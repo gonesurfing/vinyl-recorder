@@ -37,3 +37,13 @@ typedef struct {
 } recorder_args_t;
 
 void *recorder_thread_main(void *arg);
+
+#include <sys/types.h>
+
+// Spawn `flac --best --silent --delete-input-file <wav_path>`. On success,
+// returns 0 and writes the child pid into *out_pid. The WAV file is deleted
+// by flac after a successful encode; the resulting FLAC sits next to it.
+int  flac_spawn(const char *wav_path, pid_t *out_pid);
+// Non-blocking check: returns 1 if the encoder finished successfully,
+// -1 on error, 0 if still running. *pid is zeroed when reaped.
+int  flac_poll(pid_t *pid);

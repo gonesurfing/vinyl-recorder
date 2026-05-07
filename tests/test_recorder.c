@@ -4,8 +4,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <spawn.h>
+extern char **environ;
 
 static const char *tmp_path(const char *name) {
     static char buf[256];
@@ -78,9 +82,27 @@ TEST(wav_roundtrip_preserves_samples) {
     unlink(p);
 }
 
+TEST(flac_poll_reports_done_for_finished_process) {
+    pid_t pid;
+    char *argv[] = { "true", NULL };
+    // posix_spawnp searches PATH so the test works whether `true` lives in
+    // /bin (Linux) or /usr/bin (macOS).
+    ASSERT(posix_spawnp(&pid, "true", NULL, NULL, argv, environ) == 0);
+    // Wait for the child to actually exit before polling.
+    for (int i = 0; i < 100; i++) {
+        int rc = flac_poll(&pid);
+        if (rc == 1) { ASSERT_EQ_LL(pid, 0); return; }
+        ASSERT(rc == 0);
+        struct timespec ts = { 0, 10 * 1000 * 1000 };
+        nanosleep(&ts, NULL);
+    }
+    ASSERT(0 && "child never reaped");
+}
+
 void run_recorder_tests(void) {
     RUN(lookback_under_capacity);
     RUN(lookback_at_capacity_keeps_newest);
     RUN(lookback_multiple_pushes_wrap);
     RUN(wav_roundtrip_preserves_samples);
+    RUN(flac_poll_reports_done_for_finished_process);
 }

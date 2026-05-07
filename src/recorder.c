@@ -3,6 +3,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <sys/stat.h>
+#include <errno.h>
+#include <time.h>
+#include <pthread.h>
+
+extern char **environ;
 
 // --- Lookback buffer -----------------------------------------------------
 
@@ -98,9 +106,156 @@ int sndfile_read_int16_for_test(const char *path, int16_t *out,
     return (int)(got * info.channels);
 }
 
-// --- Recorder thread (stub — implemented in next task) -------------------
+// --- FLAC spawn / poll ---------------------------------------------------
+
+int flac_spawn(const char *wav_path, pid_t *out_pid) {
+    char *argv[] = {
+        "flac", "--best", "--silent", "--delete-input-file",
+        (char *)wav_path, NULL,
+    };
+    pid_t pid = 0;
+    int rc = posix_spawnp(&pid, "flac", NULL, NULL, argv, environ);
+    if (rc != 0) {
+        errno = rc;
+        return -1;
+    }
+    *out_pid = pid;
+    return 0;
+}
+
+int flac_poll(pid_t *pid) {
+    if (*pid == 0) return 1;
+    int status = 0;
+    pid_t r = waitpid(*pid, &status, WNOHANG);
+    if (r == 0) return 0;
+    if (r < 0)  return -1;
+    *pid = 0;
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) return 1;
+    return -1;
+}
+
+// --- Recorder thread -----------------------------------------------------
+
+static void make_filename(char *out, size_t n, const char *dir) {
+    time_t t = time(NULL);
+    struct tm tm;
+    localtime_r(&t, &tm);
+    snprintf(out, n, "%s/%04d-%02d-%02d_%02d%02d%02d.wav",
+             dir,
+             tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+             tm.tm_hour, tm.tm_min, tm.tm_sec);
+}
+
+static int ensure_dir(const char *dir) {
+    struct stat sb;
+    if (stat(dir, &sb) == 0 && S_ISDIR(sb.st_mode)) return 0;
+    return mkdir(dir, 0755);
+}
+
+#define SCRATCH_FRAMES (PERIOD_FRAMES * 2)
 
 void *recorder_thread_main(void *arg) {
-    (void)arg;
+    recorder_args_t *a = (recorder_args_t *)arg;
+    app_state_t *st = a->st;
+
+    if (ensure_dir(a->output_dir) != 0) {
+        fprintf(stderr, "cannot create output dir %s\n", a->output_dir);
+        atomic_store(&st->quit, 1);
+        return NULL;
+    }
+
+    lookback_t lb;
+    size_t lb_samples = (size_t)(PREROLL_SECONDS * a->rate) * CHANNELS;
+    if (lookback_init(&lb, lb_samples) != 0) {
+        atomic_store(&st->quit, 1);
+        return NULL;
+    }
+
+    int16_t *scratch = malloc(SCRATCH_FRAMES * CHANNELS * sizeof(int16_t));
+    if (!scratch) { lookback_free(&lb); atomic_store(&st->quit, 1); return NULL; }
+
+    wav_writer_t *wav = NULL;
+    char wav_path[512] = { 0 };
+    pid_t encoder_pid = 0;
+    rec_state_t state = REC_IDLE;
+    atomic_store(&st->rec_state, state);
+
+    while (!atomic_load(&st->quit)) {
+        // Reap any finished encoder.
+        if (encoder_pid != 0) {
+            int r = flac_poll(&encoder_pid);
+            if (r != 0) atomic_store(&st->encoder_active, 0);
+        }
+
+        // Handle UI requests.
+        int req = atomic_exchange(&st->rec_request, 0);
+        if (req == 1 && state == REC_IDLE) {
+            // start
+            make_filename(wav_path, sizeof(wav_path), a->output_dir);
+            wav = wav_open(wav_path, a->rate, CHANNELS);
+            if (wav) {
+                size_t n = lookback_size(&lb);
+                if (n > 0) {
+                    int16_t *dump = malloc(n * sizeof(int16_t));
+                    if (dump) {
+                        lookback_dump(&lb, dump);
+                        wav_write(wav, dump, n / CHANNELS);
+                        free(dump);
+                    }
+                }
+                atomic_store(&st->frames_recorded, 0);
+                state = REC_RUNNING;
+                atomic_store(&st->rec_state, state);
+            }
+        } else if (req == 2 && state == REC_RUNNING) {
+            // stop -> drain ring -> close -> spawn flac
+            state = REC_STOPPING;
+            atomic_store(&st->rec_state, state);
+        } else if (req == 3 && state == REC_RUNNING) {
+            // split: close current, open next
+            wav_close(wav); wav = NULL;
+            if (flac_spawn(wav_path, &encoder_pid) == 0)
+                atomic_store(&st->encoder_active, 1);
+            make_filename(wav_path, sizeof(wav_path), a->output_dir);
+            wav = wav_open(wav_path, a->rate, CHANNELS);
+            atomic_store(&st->frames_recorded, 0);
+        }
+
+        // Drain the ring.
+        size_t got = ring_read(a->ring, scratch, SCRATCH_FRAMES * CHANNELS);
+        if (got == 0) {
+            // No data this tick. If stopping with file open and ring empty, finish.
+            if (state == REC_STOPPING && wav != NULL) {
+                wav_close(wav); wav = NULL;
+                if (flac_spawn(wav_path, &encoder_pid) == 0)
+                    atomic_store(&st->encoder_active, 1);
+                state = REC_IDLE;
+                atomic_store(&st->rec_state, state);
+            }
+            struct timespec ts = { 0, 2 * 1000 * 1000 }; // 2 ms
+            nanosleep(&ts, NULL);
+            continue;
+        }
+
+        size_t frames = got / CHANNELS;
+        if (state == REC_IDLE) {
+            lookback_push(&lb, scratch, got);
+        } else {
+            // Keep lookback fresh during recording too, so a split has pre-roll.
+            lookback_push(&lb, scratch, got);
+            if (wav != NULL) {
+                wav_write(wav, scratch, frames);
+                atomic_fetch_add(&st->frames_recorded, frames);
+            }
+        }
+    }
+
+    // Shutdown: close any open file, but DO NOT block on the encoder.
+    if (wav != NULL) {
+        wav_close(wav);
+        flac_spawn(wav_path, &encoder_pid);
+    }
+    lookback_free(&lb);
+    free(scratch);
     return NULL;
 }
