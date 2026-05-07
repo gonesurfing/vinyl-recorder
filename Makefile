@@ -4,12 +4,15 @@ WARN    := -Wall -Wextra -Wpedantic -Wshadow -Wstrict-prototypes
 OPT     := -O2 -g
 DEFINES := -D_POSIX_C_SOURCE=200809L
 
-PKGS_APP  := alsa ncursesw sndfile
-PKG_CFLAGS := $(shell pkg-config --cflags $(PKGS_APP))
-PKG_LIBS   := $(shell pkg-config --libs $(PKGS_APP))
+PKGS_APP   := alsa ncursesw sndfile
+PKGS_TEST  := sndfile
+PKG_CFLAGS_APP  := $(shell pkg-config --cflags $(PKGS_APP))
+PKG_LIBS_APP    := $(shell pkg-config --libs   $(PKGS_APP))
+PKG_CFLAGS_TEST := $(shell pkg-config --cflags $(PKGS_TEST))
+PKG_LIBS_TEST   := $(shell pkg-config --libs   $(PKGS_TEST))
 
-CFLAGS  := $(CSTD) $(WARN) $(OPT) $(DEFINES) $(PKG_CFLAGS) -Isrc
-LDFLAGS := -pthread -lm $(PKG_LIBS)
+CFLAGS  := $(CSTD) $(WARN) $(OPT) $(DEFINES) $(PKG_CFLAGS_APP) -Isrc
+LDFLAGS := -pthread -lm $(PKG_LIBS_APP)
 
 APP_SRCS := src/main.c src/ring.c src/level.c src/audio.c src/recorder.c src/ui.c
 APP_OBJS := $(APP_SRCS:.c=.o)
@@ -19,6 +22,10 @@ TEST_LIB_OBJS := $(TEST_LIB_SRCS:.c=.o)
 TEST_SRCS := tests/run_all.c tests/test_ring.c tests/test_level.c tests/test_recorder.c
 TEST_OBJS := $(TEST_SRCS:.c=.o)
 
+# Tests don't need ALSA or ncurses — only sndfile (for the WAV roundtrip test).
+# This lets the test suite build on dev hosts that lack libasound (e.g. macOS).
+$(TEST_OBJS) $(TEST_LIB_OBJS): CFLAGS := $(CSTD) $(WARN) $(OPT) $(DEFINES) $(PKG_CFLAGS_TEST) -Isrc
+
 .PHONY: all test clean
 
 all: simple_record
@@ -27,7 +34,7 @@ simple_record: $(APP_OBJS)
 	$(CC) -o $@ $^ $(LDFLAGS)
 
 run_tests: $(TEST_OBJS) $(TEST_LIB_OBJS)
-	$(CC) -o $@ $^ $(LDFLAGS)
+	$(CC) -o $@ $^ -pthread -lm $(PKG_LIBS_TEST)
 
 test: run_tests
 	./run_tests
