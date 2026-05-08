@@ -13,7 +13,7 @@ extern char **environ;
 
 static const char *tmp_path(const char *name) {
     static char buf[256];
-    snprintf(buf, sizeof(buf), "/tmp/simple_record_test_%s_%d.wav", name, (int)getpid());
+    snprintf(buf, sizeof(buf), "/tmp/vinyl_recorder_test_%s_%d.wav", name, (int)getpid());
     return buf;
 }
 

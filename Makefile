@@ -28,9 +28,9 @@ $(TEST_OBJS) $(TEST_LIB_OBJS): CFLAGS := $(CSTD) $(WARN) $(OPT) $(DEFINES) $(PKG
 
 .PHONY: all test clean
 
-all: simple_record
+all: vinyl_recorder
 
-simple_record: $(APP_OBJS)
+vinyl_recorder: $(APP_OBJS)
 	$(CC) -o $@ $^ $(LDFLAGS)
 
 run_tests: $(TEST_OBJS) $(TEST_LIB_OBJS)
@@ -43,4 +43,4 @@ test: run_tests
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(APP_OBJS) $(TEST_OBJS) $(TEST_LIB_OBJS) simple_record run_tests
+	rm -f $(APP_OBJS) $(TEST_OBJS) $(TEST_LIB_OBJS) vinyl_recorder run_tests

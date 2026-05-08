@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#define APP_NAME    "simple_record"
+#define APP_NAME    "vinyl_recorder"
 #define APP_VERSION "0.1.0"
 
 #define DEFAULT_DEVICE      "default"
