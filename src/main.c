@@ -51,6 +51,7 @@ static void usage(void) {
         "  -d, --device <name>   capture device (default: \"default\")\n"
         "  -r, --rate <hz>       sample rate (default: %d)\n"
         "  -o, --output <dir>    output directory (default: $HOME/recordings)\n"
+        "  -L, --list-devices    list available capture devices and exit\n"
         "  -v, --version         print version and exit\n"
         "  -h, --help            this help\n",
         APP_NAME, DEFAULT_RATE);
@@ -64,20 +65,22 @@ int main(int argc, char **argv) {
     };
 
     static const struct option longopts[] = {
-        { "device",  required_argument, 0, 'd' },
-        { "rate",    required_argument, 0, 'r' },
-        { "output",  required_argument, 0, 'o' },
-        { "version", no_argument,       0, 'v' },
-        { "help",    no_argument,       0, 'h' },
+        { "device",       required_argument, 0, 'd' },
+        { "rate",         required_argument, 0, 'r' },
+        { "output",       required_argument, 0, 'o' },
+        { "list-devices", no_argument,       0, 'L' },
+        { "version",      no_argument,       0, 'v' },
+        { "help",         no_argument,       0, 'h' },
         { 0, 0, 0, 0 },
     };
 
     int c;
-    while ((c = getopt_long(argc, argv, "d:r:o:vh", longopts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "d:r:o:Lvh", longopts, NULL)) != -1) {
         switch (c) {
             case 'd': cfg.device = optarg; break;
             case 'r': cfg.rate = (unsigned int)atoi(optarg); break;
             case 'o': cfg.output_dir = optarg; break;
+            case 'L': audio_list_devices(); return 0;
             case 'v': printf("%s %s\n", APP_NAME, APP_VERSION); return 0;
             case 'h': usage(); return 0;
             default:  usage(); return 2;

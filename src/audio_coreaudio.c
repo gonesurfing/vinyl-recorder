@@ -49,22 +49,36 @@ static const char *os_err_str(OSStatus s, char *buf, size_t n) {
     }                                                                    \
 } while (0)
 
-static AudioDeviceID resolve_device(const char *name) {
-    AudioObjectID dev = kAudioObjectUnknown;
+static int device_has_input(AudioDeviceID id) {
+    AudioObjectPropertyAddress streams_addr = {
+        kAudioDevicePropertyStreams,
+        kAudioDevicePropertyScopeInput,
+        kAudioObjectPropertyElementMain,
+    };
+    UInt32 stream_bytes = 0;
+    if (AudioObjectGetPropertyDataSize(id, &streams_addr,
+                                       0, NULL, &stream_bytes) != noErr)
+        return 0;
+    return stream_bytes > 0;
+}
 
-    if (!name || strcmp(name, "default") == 0) {
-        AudioObjectPropertyAddress addr = {
-            kAudioHardwarePropertyDefaultInputDevice,
-            kAudioObjectPropertyScopeGlobal,
-            kAudioObjectPropertyElementMain,
-        };
-        UInt32 size = sizeof(dev);
-        if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr,
-                                       0, NULL, &size, &dev) != noErr)
-            return kAudioObjectUnknown;
-        return dev;
-    }
+static AudioDeviceID default_input_device(void) {
+    AudioDeviceID dev = kAudioObjectUnknown;
+    AudioObjectPropertyAddress addr = {
+        kAudioHardwarePropertyDefaultInputDevice,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain,
+    };
+    UInt32 size = sizeof(dev);
+    AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr,
+                               0, NULL, &size, &dev);
+    return dev;
+}
 
+// Allocate and return the list of all AudioDeviceIDs. Caller frees.
+// On failure returns NULL and sets *count to 0.
+static AudioDeviceID *all_device_ids(UInt32 *count) {
+    *count = 0;
     AudioObjectPropertyAddress list_addr = {
         kAudioHardwarePropertyDevices,
         kAudioObjectPropertyScopeGlobal,
@@ -73,29 +87,30 @@ static AudioDeviceID resolve_device(const char *name) {
     UInt32 size = 0;
     if (AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &list_addr,
                                        0, NULL, &size) != noErr || size == 0)
-        return kAudioObjectUnknown;
-
-    UInt32 count = size / sizeof(AudioDeviceID);
-    AudioDeviceID *ids = calloc(count, sizeof(AudioDeviceID));
-    if (!ids) return kAudioObjectUnknown;
+        return NULL;
+    UInt32 n = size / sizeof(AudioDeviceID);
+    AudioDeviceID *ids = calloc(n, sizeof(AudioDeviceID));
+    if (!ids) return NULL;
     if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &list_addr,
                                    0, NULL, &size, ids) != noErr) {
         free(ids);
-        return kAudioObjectUnknown;
+        return NULL;
     }
+    *count = n;
+    return ids;
+}
+
+static AudioDeviceID resolve_device(const char *name) {
+    if (!name || strcmp(name, "default") == 0)
+        return default_input_device();
+
+    UInt32 count = 0;
+    AudioDeviceID *ids = all_device_ids(&count);
+    if (!ids) return kAudioObjectUnknown;
+    AudioDeviceID dev = kAudioObjectUnknown;
 
     for (UInt32 i = 0; i < count; i++) {
-        // Skip devices with no input streams.
-        AudioObjectPropertyAddress streams_addr = {
-            kAudioDevicePropertyStreams,
-            kAudioDevicePropertyScopeInput,
-            kAudioObjectPropertyElementMain,
-        };
-        UInt32 stream_bytes = 0;
-        if (AudioObjectGetPropertyDataSize(ids[i], &streams_addr,
-                                           0, NULL, &stream_bytes) != noErr
-            || stream_bytes == 0)
-            continue;
+        if (!device_has_input(ids[i])) continue;
 
         // Match against UID (exact) or name (substring, case-insensitive).
         CFStringRef uid = NULL, dname = NULL;
@@ -134,6 +149,69 @@ static AudioDeviceID resolve_device(const char *name) {
 
     free(ids);
     return dev;
+}
+
+static void cfstr_to_c(CFStringRef s, char *out, size_t n) {
+    if (!s || !CFStringGetCString(s, out, (CFIndex)n, kCFStringEncodingUTF8))
+        snprintf(out, n, "(unknown)");
+}
+
+void audio_list_devices(void) {
+    AudioDeviceID def = default_input_device();
+    UInt32 count = 0;
+    AudioDeviceID *ids = all_device_ids(&count);
+    if (!ids) {
+        fprintf(stderr, "CoreAudio: failed to enumerate devices\n");
+        return;
+    }
+
+    printf("CoreAudio input devices (use -d <name-substring|UID>):\n\n");
+    int printed = 0;
+    for (UInt32 i = 0; i < count; i++) {
+        if (!device_has_input(ids[i])) continue;
+
+        CFStringRef cf_name = NULL, cf_uid = NULL;
+        UInt32 sz;
+        AudioObjectPropertyAddress name_addr = {
+            kAudioObjectPropertyName,
+            kAudioObjectPropertyScopeGlobal,
+            kAudioObjectPropertyElementMain,
+        };
+        sz = sizeof(cf_name);
+        AudioObjectGetPropertyData(ids[i], &name_addr, 0, NULL, &sz, &cf_name);
+
+        AudioObjectPropertyAddress uid_addr = {
+            kAudioDevicePropertyDeviceUID,
+            kAudioObjectPropertyScopeGlobal,
+            kAudioObjectPropertyElementMain,
+        };
+        sz = sizeof(cf_uid);
+        AudioObjectGetPropertyData(ids[i], &uid_addr, 0, NULL, &sz, &cf_uid);
+
+        Float64 rate = 0.0;
+        AudioObjectPropertyAddress rate_addr = {
+            kAudioDevicePropertyNominalSampleRate,
+            kAudioDevicePropertyScopeInput,
+            kAudioObjectPropertyElementMain,
+        };
+        sz = sizeof(rate);
+        AudioObjectGetPropertyData(ids[i], &rate_addr, 0, NULL, &sz, &rate);
+
+        char name_c[256], uid_c[256];
+        cfstr_to_c(cf_name, name_c, sizeof(name_c));
+        cfstr_to_c(cf_uid,  uid_c,  sizeof(uid_c));
+
+        printf("  %s %s\n", (ids[i] == def) ? "*" : " ", name_c);
+        printf("      UID:  %s\n", uid_c);
+        printf("      rate: %.0f Hz\n", rate);
+
+        if (cf_name) CFRelease(cf_name);
+        if (cf_uid)  CFRelease(cf_uid);
+        printed++;
+    }
+    if (!printed) printf("  (no input-capable devices found)\n");
+    printf("\n  * = current system default input (selected by -d default)\n");
+    free(ids);
 }
 
 static void log_device_info(AudioDeviceID dev, unsigned int requested_rate) {

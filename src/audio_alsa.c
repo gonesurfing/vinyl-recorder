@@ -5,6 +5,38 @@
 #include <stdlib.h>
 #include <string.h>
 
+void audio_list_devices(void) {
+    void **hints = NULL;
+    if (snd_device_name_hint(-1, "pcm", &hints) < 0 || !hints) {
+        fprintf(stderr, "ALSA: snd_device_name_hint failed\n");
+        return;
+    }
+
+    printf("ALSA capture PCMs (use -d <name>):\n\n");
+    int printed = 0;
+    for (void **h = hints; *h; h++) {
+        char *ioid = snd_device_name_get_hint(*h, "IOID");
+        // IOID null = input+output, "Input" = capture only, "Output" = playback only.
+        int is_input = (!ioid || strcmp(ioid, "Input") == 0);
+        if (is_input) {
+            char *name = snd_device_name_get_hint(*h, "NAME");
+            char *desc = snd_device_name_get_hint(*h, "DESC");
+            printf("  %s\n", name ? name : "(unnamed)");
+            if (desc) {
+                // DESC may contain newlines — replace with " | " for one-line output.
+                for (char *p = desc; *p; p++) if (*p == '\n') *p = ' ';
+                printf("      %s\n", desc);
+            }
+            free(name);
+            free(desc);
+            printed++;
+        }
+        free(ioid);
+    }
+    if (!printed) printf("  (no capture-capable PCMs found)\n");
+    snd_device_name_free_hint(hints);
+}
+
 static int configure_pcm(snd_pcm_t *pcm, unsigned int *rate,
                          snd_pcm_uframes_t *period_frames,
                          unsigned int *periods_out) {

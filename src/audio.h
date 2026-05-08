@@ -11,3 +11,6 @@ typedef struct {
 
 // Thread entry. Returns NULL. Sets st->quit on fatal error.
 void *audio_thread_main(void *arg);
+
+// Print available input-capable capture devices to stdout. Backend-specific.
+void audio_list_devices(void);
