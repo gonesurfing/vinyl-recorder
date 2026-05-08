@@ -52,9 +52,42 @@ static void usage(void) {
         "  -r, --rate <hz>       sample rate (default: %d)\n"
         "  -o, --output <dir>    output directory (default: $HOME/recordings)\n"
         "  -L, --list-devices    list available capture devices and exit\n"
+        "  -P, --probe           capture for 3s without UI; print levels (diagnostic)\n"
         "  -v, --version         print version and exit\n"
         "  -h, --help            this help\n",
         APP_NAME, DEFAULT_RATE);
+}
+
+// Diagnostic mode: spin up the audio thread and poll meter atomics for a few
+// seconds, printing per-tick to stderr. Bypasses ncurses entirely.
+static int run_probe(audio_args_t *aargs) {
+    pthread_t audio_thr;
+    if (pthread_create(&audio_thr, NULL, audio_thread_main, aargs) != 0) {
+        fprintf(stderr, "probe: pthread_create failed\n");
+        return 1;
+    }
+
+    fprintf(stderr,
+            "probe: capturing for 3s — make some noise (clap, speak, drop the needle).\n");
+    fprintf(stderr,
+            "  t(ms)   block_seq    peak_l    peak_r    rms_l    rms_r   xruns\n");
+
+    struct timespec slp = { .tv_sec = 0, .tv_nsec = 200 * 1000 * 1000 };
+    for (int i = 0; i < 15 && !atomic_load(&g_state.quit); i++) {
+        nanosleep(&slp, NULL);
+        int pl = atomic_load(&g_state.peak_left);
+        int pr = atomic_load(&g_state.peak_right);
+        int rl = atomic_load(&g_state.rms_left_q15);
+        int rr = atomic_load(&g_state.rms_right_q15);
+        unsigned long seq = (unsigned long)atomic_load(&g_state.block_seq);
+        int xr = atomic_load(&g_state.xrun_count);
+        fprintf(stderr, "  %5d   %9lu  %8d  %8d  %7d  %7d  %6d\n",
+                (i + 1) * 200, seq, pl, pr, rl, rr, xr);
+    }
+
+    atomic_store(&g_state.quit, 1);
+    pthread_join(audio_thr, NULL);
+    return 0;
 }
 
 int main(int argc, char **argv) {
@@ -64,23 +97,26 @@ int main(int argc, char **argv) {
         .output_dir = default_output_dir(),
     };
 
+    int probe = 0;
     static const struct option longopts[] = {
         { "device",       required_argument, 0, 'd' },
         { "rate",         required_argument, 0, 'r' },
         { "output",       required_argument, 0, 'o' },
         { "list-devices", no_argument,       0, 'L' },
+        { "probe",        no_argument,       0, 'P' },
         { "version",      no_argument,       0, 'v' },
         { "help",         no_argument,       0, 'h' },
         { 0, 0, 0, 0 },
     };
 
     int c;
-    while ((c = getopt_long(argc, argv, "d:r:o:Lvh", longopts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "d:r:o:LPvh", longopts, NULL)) != -1) {
         switch (c) {
             case 'd': cfg.device = optarg; break;
             case 'r': cfg.rate = (unsigned int)atoi(optarg); break;
             case 'o': cfg.output_dir = optarg; break;
             case 'L': audio_list_devices(); return 0;
+            case 'P': probe = 1; break;
             case 'v': printf("%s %s\n", APP_NAME, APP_VERSION); return 0;
             case 'h': usage(); return 0;
             default:  usage(); return 2;
@@ -94,7 +130,9 @@ int main(int argc, char **argv) {
     sigaction(SIGINT,  &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 
-    // Ring buffer sized for ~2 seconds of audio at the requested rate, rounded
+    cfg.rate = audio_pick_rate(cfg.device, cfg.rate);
+
+    // Ring buffer sized for ~2 seconds of audio at the negotiated rate, rounded
     // up to a power of two by ring_init. Frame size is CHANNELS samples.
     size_t ring_capacity = (size_t)(cfg.rate * CHANNELS * 2);
     ring_t ring;
@@ -106,6 +144,13 @@ int main(int argc, char **argv) {
     audio_args_t aargs = {
         .device = cfg.device, .rate = cfg.rate, .ring = &ring, .st = &g_state,
     };
+
+    if (probe) {
+        int rc = run_probe(&aargs);
+        ring_free(&ring);
+        return rc;
+    }
+
     recorder_args_t rargs = {
         .ring = &ring, .st = &g_state, .output_dir = cfg.output_dir, .rate = (int)cfg.rate,
     };

@@ -15,9 +15,12 @@
 
 typedef struct {
     AudioUnit        au;
-    AudioBufferList *abl;       // 1 buffer, points at scratch
-    int16_t         *scratch;
+    AudioBufferList *abl;        // 1 buffer, points at au_scratch
+    int16_t         *au_scratch; // raw AU output: device_channels * max_frames samples
+    int16_t         *ring_block; // mixed-down stereo: 2 * max_frames samples
     UInt32           max_frames;
+    UInt32           device_channels; // 1, 2, or N — what the AU actually delivers
+    _Atomic int      last_au_err;     // OSStatus from most recent AudioUnitRender failure
     audio_args_t    *args;
 } ca_ctx_t;
 
@@ -151,6 +154,108 @@ static AudioDeviceID resolve_device(const char *name) {
     return dev;
 }
 
+// Fetch the device's discrete and range-based supported input sample rates.
+// Returns a calloc'd array (caller frees) and writes the count to *out_n.
+// On failure returns NULL with *out_n = 0.
+static AudioValueRange *available_rates(AudioDeviceID dev, UInt32 *out_n) {
+    *out_n = 0;
+    AudioObjectPropertyAddress addr = {
+        kAudioDevicePropertyAvailableNominalSampleRates,
+        kAudioDevicePropertyScopeInput,
+        kAudioObjectPropertyElementMain,
+    };
+    UInt32 size = 0;
+    if (AudioObjectGetPropertyDataSize(dev, &addr, 0, NULL, &size) != noErr
+        || size == 0)
+        return NULL;
+    UInt32 n = size / sizeof(AudioValueRange);
+    AudioValueRange *r = calloc(n, sizeof(AudioValueRange));
+    if (!r) return NULL;
+    if (AudioObjectGetPropertyData(dev, &addr, 0, NULL, &size, r) != noErr) {
+        free(r);
+        return NULL;
+    }
+    *out_n = n;
+    return r;
+}
+
+static int rate_is_supported(AudioDeviceID dev, unsigned hz) {
+    UInt32 n = 0;
+    AudioValueRange *r = available_rates(dev, &n);
+    if (!r) return 0;
+    int ok = 0;
+    for (UInt32 i = 0; i < n; i++) {
+        if ((double)hz >= r[i].mMinimum && (double)hz <= r[i].mMaximum) {
+            ok = 1;
+            break;
+        }
+    }
+    free(r);
+    return ok;
+}
+
+static Float64 read_current_rate(AudioDeviceID dev) {
+    Float64 rate = 0.0;
+    AudioObjectPropertyAddress addr = {
+        kAudioDevicePropertyNominalSampleRate,
+        kAudioDevicePropertyScopeInput,
+        kAudioObjectPropertyElementMain,
+    };
+    UInt32 sz = sizeof(rate);
+    AudioObjectGetPropertyData(dev, &addr, 0, NULL, &sz, &rate);
+    return rate;
+}
+
+unsigned audio_pick_rate(const char *device, unsigned requested) {
+    AudioDeviceID dev = resolve_device(device);
+    if (dev == kAudioObjectUnknown) return requested;
+
+    Float64 current = read_current_rate(dev);
+    if (current <= 0) return requested;
+    if ((unsigned)current == requested) return requested;
+
+    if (!rate_is_supported(dev, requested)) {
+        fprintf(stderr,
+                "CoreAudio: %u Hz not supported by device; using current %u Hz "
+                "(see --list-devices for supported rates)\n",
+                requested, (unsigned)current);
+        return (unsigned)current;
+    }
+
+    AudioObjectPropertyAddress rate_addr = {
+        kAudioDevicePropertyNominalSampleRate,
+        kAudioDevicePropertyScopeInput,
+        kAudioObjectPropertyElementMain,
+    };
+    Float64 want = (Float64)requested;
+    OSStatus rc = AudioObjectSetPropertyData(dev, &rate_addr, 0, NULL,
+                                             sizeof(want), &want);
+    if (rc != noErr) {
+        char eb[32];
+        fprintf(stderr,
+                "CoreAudio: failed to set device rate to %u Hz: %s; using %u Hz\n",
+                requested, os_err_str(rc, eb, sizeof(eb)), (unsigned)current);
+        return (unsigned)current;
+    }
+
+    // The rate change is asynchronous; poll up to ~500 ms for it to settle.
+    struct timespec ts = { .tv_sec = 0, .tv_nsec = 10 * 1000 * 1000 };
+    for (int i = 0; i < 50; i++) {
+        nanosleep(&ts, NULL);
+        current = read_current_rate(dev);
+        if ((unsigned)current == requested) break;
+    }
+    if ((unsigned)current != requested) {
+        fprintf(stderr,
+                "CoreAudio: device did not switch to %u Hz; reports %u Hz\n",
+                requested, (unsigned)current);
+        return (unsigned)current;
+    }
+
+    fprintf(stderr, "CoreAudio: device set to %u Hz\n", requested);
+    return requested;
+}
+
 static void cfstr_to_c(CFStringRef s, char *out, size_t n) {
     if (!s || !CFStringGetCString(s, out, (CFIndex)n, kCFStringEncodingUTF8))
         snprintf(out, n, "(unknown)");
@@ -188,22 +293,30 @@ void audio_list_devices(void) {
         sz = sizeof(cf_uid);
         AudioObjectGetPropertyData(ids[i], &uid_addr, 0, NULL, &sz, &cf_uid);
 
-        Float64 rate = 0.0;
-        AudioObjectPropertyAddress rate_addr = {
-            kAudioDevicePropertyNominalSampleRate,
-            kAudioDevicePropertyScopeInput,
-            kAudioObjectPropertyElementMain,
-        };
-        sz = sizeof(rate);
-        AudioObjectGetPropertyData(ids[i], &rate_addr, 0, NULL, &sz, &rate);
+        Float64 rate = read_current_rate(ids[i]);
 
         char name_c[256], uid_c[256];
         cfstr_to_c(cf_name, name_c, sizeof(name_c));
         cfstr_to_c(cf_uid,  uid_c,  sizeof(uid_c));
 
         printf("  %s %s\n", (ids[i] == def) ? "*" : " ", name_c);
-        printf("      UID:  %s\n", uid_c);
-        printf("      rate: %.0f Hz\n", rate);
+        printf("      UID:     %s\n", uid_c);
+        printf("      current: %.0f Hz\n", rate);
+
+        UInt32 nrates = 0;
+        AudioValueRange *ranges = available_rates(ids[i], &nrates);
+        if (ranges && nrates > 0) {
+            printf("      rates:   ");
+            for (UInt32 j = 0; j < nrates; j++) {
+                if (ranges[j].mMinimum == ranges[j].mMaximum)
+                    printf("%.0f", ranges[j].mMinimum);
+                else
+                    printf("%.0f-%.0f", ranges[j].mMinimum, ranges[j].mMaximum);
+                if (j + 1 < nrates) printf(", ");
+            }
+            printf(" Hz\n");
+        }
+        free(ranges);
 
         if (cf_name) CFRelease(cf_name);
         if (cf_uid)  CFRelease(cf_uid);
@@ -212,6 +325,28 @@ void audio_list_devices(void) {
     if (!printed) printf("  (no input-capable devices found)\n");
     printf("\n  * = current system default input (selected by -d default)\n");
     free(ids);
+}
+
+// Sum input channel count across all input streams of the device.
+static UInt32 device_input_channels(AudioDeviceID dev) {
+    AudioObjectPropertyAddress addr = {
+        kAudioDevicePropertyStreamConfiguration,
+        kAudioDevicePropertyScopeInput,
+        kAudioObjectPropertyElementMain,
+    };
+    UInt32 size = 0;
+    if (AudioObjectGetPropertyDataSize(dev, &addr, 0, NULL, &size) != noErr
+        || size == 0)
+        return 0;
+    AudioBufferList *abl = malloc(size);
+    if (!abl) return 0;
+    UInt32 channels = 0;
+    if (AudioObjectGetPropertyData(dev, &addr, 0, NULL, &size, abl) == noErr) {
+        for (UInt32 i = 0; i < abl->mNumberBuffers; i++)
+            channels += abl->mBuffers[i].mNumberChannels;
+    }
+    free(abl);
+    return channels;
 }
 
 static void log_device_info(AudioDeviceID dev, unsigned int requested_rate) {
@@ -239,8 +374,13 @@ static void log_device_info(AudioDeviceID dev, unsigned int requested_rate) {
     sz = sizeof(nominal);
     AudioObjectGetPropertyData(dev, &rate_addr, 0, NULL, &sz, &nominal);
 
-    fprintf(stderr, "CoreAudio: \"%s\" (id=%u), nominal=%.0f Hz, requested=%u Hz%s\n",
+    UInt32 dev_ch = device_input_channels(dev);
+
+    fprintf(stderr,
+            "CoreAudio: \"%s\" (id=%u), nominal=%.0f Hz, requested=%u Hz, "
+            "device input channels=%u (client wants %u)%s\n",
             namebuf, (unsigned)dev, nominal, requested_rate,
+            (unsigned)dev_ch, (unsigned)CHANNELS,
             (nominal > 0 && (unsigned)nominal != requested_rate)
                 ? " — AU will resample"
                 : "");
@@ -261,18 +401,38 @@ static OSStatus input_cb(void *ud,
     }
 
     c->abl->mBuffers[0].mDataByteSize =
-        (UInt32)(nframes * CHANNELS * sizeof(int16_t));
+        (UInt32)(nframes * c->device_channels * sizeof(int16_t));
 
     OSStatus r = AudioUnitRender(c->au, flags, ts, bus, nframes, c->abl);
     if (r != noErr) {
+        atomic_store(&c->last_au_err, (int)r);
         atomic_fetch_add(&c->args->st->xrun_count, 1);
         return noErr;
     }
 
-    int16_t *block = (int16_t *)c->abl->mBuffers[0].mData;
+    const int16_t *src = (const int16_t *)c->abl->mBuffers[0].mData;
+    int16_t       *dst = c->ring_block;
+
+    if (c->device_channels == 1) {
+        // Mono → stereo: duplicate the single channel into both L and R.
+        for (UInt32 i = 0; i < nframes; i++) {
+            int16_t s = src[i];
+            dst[2 * i + 0] = s;
+            dst[2 * i + 1] = s;
+        }
+    } else if (c->device_channels == 2) {
+        memcpy(dst, src, (size_t)nframes * 2 * sizeof(int16_t));
+    } else {
+        // N>2 channels: take the first two as L/R and ignore the rest.
+        const UInt32 stride = c->device_channels;
+        for (UInt32 i = 0; i < nframes; i++) {
+            dst[2 * i + 0] = src[i * stride + 0];
+            dst[2 * i + 1] = src[i * stride + 1];
+        }
+    }
 
     float pl, rl, pr, rr;
-    block_stats_s16_stereo(block, (size_t)nframes, &pl, &rl, &pr, &rr);
+    block_stats_s16_stereo(dst, (size_t)nframes, &pl, &rl, &pr, &rr);
     atomic_store(&c->args->st->peak_left,    (int)pl);
     atomic_store(&c->args->st->peak_right,   (int)pr);
     atomic_store(&c->args->st->rms_left_q15, (int)rl);
@@ -280,7 +440,7 @@ static OSStatus input_cb(void *ud,
     atomic_fetch_add(&c->args->st->block_seq, 1);
 
     size_t want = (size_t)nframes * CHANNELS;
-    size_t wrote = ring_write(c->args->ring, block, want);
+    size_t wrote = ring_write(c->args->ring, dst, want);
     if (wrote < want) atomic_fetch_add(&c->args->st->xrun_count, 1);
 
     return noErr;
@@ -326,17 +486,25 @@ void *audio_thread_main(void *arg) {
                                &dev, sizeof(dev)),
           "CurrentDevice");
 
-    // Client format: S16 interleaved stereo at requested rate.
+    UInt32 dev_ch = device_input_channels(dev);
+    if (dev_ch == 0) {
+        fprintf(stderr, "CoreAudio: device reports 0 input channels\n");
+        goto fail;
+    }
+    ctx.device_channels = dev_ch;
+
+    // Client format matches the device's channel count; we mix to stereo
+    // ourselves in the callback before pushing into the (stereo) ring.
     AudioStreamBasicDescription fmt = {
         .mSampleRate       = (Float64)a->rate,
         .mFormatID         = kAudioFormatLinearPCM,
         .mFormatFlags      = kLinearPCMFormatFlagIsSignedInteger
                            | kLinearPCMFormatFlagIsPacked,
         .mFramesPerPacket  = 1,
-        .mChannelsPerFrame = CHANNELS,
+        .mChannelsPerFrame = dev_ch,
         .mBitsPerChannel   = 16,
-        .mBytesPerFrame    = CHANNELS * sizeof(int16_t),
-        .mBytesPerPacket   = CHANNELS * sizeof(int16_t),
+        .mBytesPerFrame    = dev_ch * sizeof(int16_t),
+        .mBytesPerPacket   = dev_ch * sizeof(int16_t),
     };
     CHECK(AudioUnitSetProperty(ctx.au, kAudioUnitProperty_StreamFormat,
                                kAudioUnitScope_Output, CA_INPUT_BUS,
@@ -351,17 +519,18 @@ void *audio_thread_main(void *arg) {
     if (max_frames < 4096) max_frames = 4096;
     ctx.max_frames = max_frames;
 
-    ctx.scratch = calloc((size_t)max_frames * CHANNELS, sizeof(int16_t));
-    ctx.abl = calloc(1, sizeof(AudioBufferList));
-    if (!ctx.scratch || !ctx.abl) {
+    ctx.au_scratch = calloc((size_t)max_frames * dev_ch,    sizeof(int16_t));
+    ctx.ring_block = calloc((size_t)max_frames * CHANNELS,  sizeof(int16_t));
+    ctx.abl        = calloc(1, sizeof(AudioBufferList));
+    if (!ctx.au_scratch || !ctx.ring_block || !ctx.abl) {
         fprintf(stderr, "CoreAudio: OOM allocating capture buffers\n");
         goto fail;
     }
     ctx.abl->mNumberBuffers = 1;
-    ctx.abl->mBuffers[0].mNumberChannels = CHANNELS;
+    ctx.abl->mBuffers[0].mNumberChannels = dev_ch;
     ctx.abl->mBuffers[0].mDataByteSize =
-        (UInt32)(max_frames * CHANNELS * sizeof(int16_t));
-    ctx.abl->mBuffers[0].mData = ctx.scratch;
+        (UInt32)(max_frames * dev_ch * sizeof(int16_t));
+    ctx.abl->mBuffers[0].mData = ctx.au_scratch;
 
     AURenderCallbackStruct cb = { .inputProc = input_cb, .inputProcRefCon = &ctx };
     CHECK(AudioUnitSetProperty(ctx.au, kAudioOutputUnitProperty_SetInputCallback,
@@ -370,15 +539,52 @@ void *audio_thread_main(void *arg) {
           "SetInputCallback");
 
     CHECK(AudioUnitInitialize(ctx.au), "AudioUnitInitialize");
+
+    // Diagnostic: query the formats AU actually accepted on both scopes of bus 1.
+    {
+        AudioStreamBasicDescription got;
+        UInt32 got_sz = sizeof(got);
+        if (AudioUnitGetProperty(ctx.au, kAudioUnitProperty_StreamFormat,
+                                 kAudioUnitScope_Input, CA_INPUT_BUS,
+                                 &got, &got_sz) == noErr) {
+            fprintf(stderr,
+                    "  bus1 input scope  (device): %.0f Hz, %u ch, %u bits, flags=0x%x\n",
+                    got.mSampleRate, (unsigned)got.mChannelsPerFrame,
+                    (unsigned)got.mBitsPerChannel, (unsigned)got.mFormatFlags);
+        }
+        got_sz = sizeof(got);
+        if (AudioUnitGetProperty(ctx.au, kAudioUnitProperty_StreamFormat,
+                                 kAudioUnitScope_Output, CA_INPUT_BUS,
+                                 &got, &got_sz) == noErr) {
+            fprintf(stderr,
+                    "  bus1 output scope (client): %.0f Hz, %u ch, %u bits, flags=0x%x\n",
+                    got.mSampleRate, (unsigned)got.mChannelsPerFrame,
+                    (unsigned)got.mBitsPerChannel, (unsigned)got.mFormatFlags);
+        }
+    }
+
     CHECK(AudioOutputUnitStart(ctx.au), "AudioOutputUnitStart");
     started = 1;
 
-    fprintf(stderr, "CoreAudio: capture started @ %u Hz, max_frames=%u\n",
-            a->rate, (unsigned)max_frames);
+    fprintf(stderr,
+            "CoreAudio: capture started @ %u Hz, max_frames=%u, device_channels=%u\n",
+            a->rate, (unsigned)max_frames, (unsigned)dev_ch);
 
     // Block until shutdown — capture happens on the CoreAudio RT thread.
+    // Surface the first AudioUnitRender error code (and any change after that)
+    // to stderr exactly once so we don't spam.
     struct timespec slp = { .tv_sec = 0, .tv_nsec = 50 * 1000 * 1000 };
-    while (!atomic_load(&a->st->quit)) nanosleep(&slp, NULL);
+    int last_logged_err = 0;
+    while (!atomic_load(&a->st->quit)) {
+        nanosleep(&slp, NULL);
+        int err = atomic_load(&ctx.last_au_err);
+        if (err != 0 && err != last_logged_err) {
+            char eb[32];
+            fprintf(stderr, "CoreAudio: AudioUnitRender failing with %s\n",
+                    os_err_str((OSStatus)err, eb, sizeof(eb)));
+            last_logged_err = err;
+        }
+    }
 
 fail:
     if (ctx.au) {
@@ -386,7 +592,8 @@ fail:
         AudioUnitUninitialize(ctx.au);
         AudioComponentInstanceDispose(ctx.au);
     }
-    free(ctx.scratch);
+    free(ctx.au_scratch);
+    free(ctx.ring_block);
     free(ctx.abl);
     if (!started) atomic_store(&a->st->quit, 1);
     return NULL;

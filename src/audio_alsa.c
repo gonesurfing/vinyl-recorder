@@ -5,6 +5,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+unsigned audio_pick_rate(const char *device, unsigned requested) {
+    // ALSA negotiates rate per-stream and the plug/dmix layer handles
+    // resampling when the hardware can't deliver the requested rate.
+    // Trust the user's choice.
+    (void)device;
+    return requested;
+}
+
 void audio_list_devices(void) {
     void **hints = NULL;
     if (snd_device_name_hint(-1, "pcm", &hints) < 0 || !hints) {
