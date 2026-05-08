@@ -48,7 +48,7 @@ static const char *default_output_dir(void) {
 static void usage(void) {
     fprintf(stderr,
         "usage: %s [options]\n"
-        "  -d, --device <name>   ALSA device (default: \"default\")\n"
+        "  -d, --device <name>   capture device (default: \"default\")\n"
         "  -r, --rate <hz>       sample rate (default: %d)\n"
         "  -o, --output <dir>    output directory (default: $HOME/recordings)\n"
         "  -v, --version         print version and exit\n"

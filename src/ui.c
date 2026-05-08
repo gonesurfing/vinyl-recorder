@@ -2,7 +2,11 @@
 #include "ui.h"
 #include "level.h"
 #include <locale.h>
+#if defined(__APPLE__)
+#include <ncurses.h>
+#else
 #include <ncursesw/ncurses.h>
+#endif
 #include <stdio.h>
 #include <string.h>
 #include <time.h>

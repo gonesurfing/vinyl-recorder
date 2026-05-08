@@ -4,17 +4,29 @@ WARN    := -Wall -Wextra -Wpedantic -Wshadow -Wstrict-prototypes
 OPT     := -O2 -g
 DEFINES := -D_POSIX_C_SOURCE=200809L
 
-PKGS_APP   := alsa ncursesw sndfile
-PKGS_TEST  := sndfile
-PKG_CFLAGS_APP  := $(shell pkg-config --cflags $(PKGS_APP))
-PKG_LIBS_APP    := $(shell pkg-config --libs   $(PKGS_APP))
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+  AUDIO_SRC      := src/audio_coreaudio.c
+  PLAT_LIBS      := -framework CoreAudio -framework AudioUnit -framework AudioToolbox -framework CoreFoundation
+  # ncursesw lacks a pkg-config file in macOS's bundled ncurses; link plain -lncurses.
+  PKG_CFLAGS_APP := $(shell pkg-config --cflags sndfile 2>/dev/null)
+  PKG_LIBS_APP   := $(shell pkg-config --libs   sndfile 2>/dev/null) -lncurses
+else
+  AUDIO_SRC      := src/audio_alsa.c
+  PKGS_APP       := alsa ncursesw sndfile
+  PLAT_LIBS      :=
+  PKG_CFLAGS_APP := $(shell pkg-config --cflags $(PKGS_APP))
+  PKG_LIBS_APP   := $(shell pkg-config --libs   $(PKGS_APP))
+endif
+
+PKGS_TEST       := sndfile
 PKG_CFLAGS_TEST := $(shell pkg-config --cflags $(PKGS_TEST))
 PKG_LIBS_TEST   := $(shell pkg-config --libs   $(PKGS_TEST))
 
 CFLAGS  := $(CSTD) $(WARN) $(OPT) $(DEFINES) $(PKG_CFLAGS_APP) -Isrc
-LDFLAGS := -pthread -lm $(PKG_LIBS_APP)
+LDFLAGS := -pthread -lm $(PKG_LIBS_APP) $(PLAT_LIBS)
 
-APP_SRCS := src/main.c src/ring.c src/level.c src/audio.c src/recorder.c src/ui.c
+APP_SRCS := src/main.c src/ring.c src/level.c $(AUDIO_SRC) src/recorder.c src/ui.c
 APP_OBJS := $(APP_SRCS:.c=.o)
 
 TEST_LIB_SRCS := src/ring.c src/level.c src/recorder.c
