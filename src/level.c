@@ -33,7 +33,7 @@ void block_stats_s16_stereo(const int16_t *samples, size_t frames,
 }
 
 #define PPM_ATTACK_TC   0.010f
-#define PPM_RELEASE_TC  1.700f
+#define PPM_RELEASE_DB_PER_S (20.0f / 1.7f)  // DIN-PPM fallback: 20 dB in 1.7 s
 #define PPM_HOLD_TIME   1.500f
 #define PPM_HOLD_DECAY_PER_S 0.5f  // hold falls by half per second after expiry
 
@@ -44,9 +44,19 @@ void ppm_init(ppm_t *p) {
 }
 
 void ppm_update(ppm_t *p, float new_peak, float dt) {
-    float tc = (new_peak > p->bar) ? PPM_ATTACK_TC : PPM_RELEASE_TC;
-    float alpha = 1.0f - expf(-dt / tc);
-    p->bar += alpha * (new_peak - p->bar);
+    if (new_peak > p->bar) {
+        // Fast exponential attack so peaks register.
+        float alpha = 1.0f - expf(-dt / PPM_ATTACK_TC);
+        p->bar += alpha * (new_peak - p->bar);
+    } else {
+        // Linear-in-dB release: constant dB/s fall toward new_peak.
+        float bar_db = dbfs_from_linear(p->bar);
+        bar_db -= PPM_RELEASE_DB_PER_S * dt;
+        if (bar_db < LEVEL_FLOOR_DB) bar_db = LEVEL_FLOOR_DB;
+        float new_bar = SAMPLE_FULL_SCALE * powf(10.0f, bar_db / 20.0f);
+        if (new_bar < new_peak) new_bar = new_peak;
+        p->bar = new_bar;
+    }
 
     if (new_peak >= p->hold) {
         p->hold = new_peak;

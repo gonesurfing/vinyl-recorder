@@ -51,11 +51,13 @@ TEST(ppm_attack_then_release) {
     for (int i = 0; i < 50; i++) ppm_update(&p, 16384.0f, dt);
     ASSERT_NEAR(p.bar, 16384.0f, 200.0f);
 
-    // Now drop input to zero. Release TC = 1.7 s. After 0.5 s we should have
-    // decayed roughly by a factor of e^(-0.5/1.7) ≈ 0.745.
+    // Now drop input to zero. Release is linear-in-dB at 20 dB / 1.7 s.
+    // Starting at -6.0206 dBFS, after 0.5 s we expect -6.0206 - (20/1.7)*0.5
+    // = -11.903 dBFS, i.e. ~8324 linear.
     for (int i = 0; i < 500; i++) ppm_update(&p, 0.0f, dt);
-    float expected = 16384.0f * expf(-0.5f / 1.7f);
-    ASSERT_NEAR(p.bar, expected, expected * 0.05f);
+    float expected_db = -6.0206f - (20.0f / 1.7f) * 0.5f;
+    float expected    = 32768.0f * powf(10.0f, expected_db / 20.0f);
+    ASSERT_NEAR(p.bar, expected, expected * 0.02f);
 }
 
 TEST(ppm_hold_captures_peak) {
