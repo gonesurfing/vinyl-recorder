@@ -4,6 +4,7 @@
 #include "recorder.h"
 #include "ui.h"
 
+#include <fcntl.h>
 #include <getopt.h>
 #include <pthread.h>
 #include <pwd.h>
@@ -11,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static app_state_t g_state;
@@ -164,6 +166,25 @@ int main(int argc, char **argv) {
         .ring = &ring, .st = &g_state, .output_dir = cfg.output_dir, .rate = (int)cfg.rate,
     };
 
+    // Redirect stderr to a log file so audio/recorder messages (xruns,
+    // CoreAudio init, etc.) don't scribble onto the ncurses UI.
+    int saved_stderr = -1;
+    {
+        char log_path[600];
+        snprintf(log_path, sizeof(log_path), "%s/vinyl_recorder.log", cfg.output_dir);
+        mkdir(cfg.output_dir, 0755);  // best-effort; recorder also creates it
+        int log_fd = open(log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (log_fd >= 0) {
+            fprintf(stderr, "logging audio/recorder messages to %s\n", log_path);
+            fflush(stderr);
+            saved_stderr = dup(STDERR_FILENO);
+            dup2(log_fd, STDERR_FILENO);
+            close(log_fd);
+            // Line-buffer the log so messages land promptly on disk.
+            setvbuf(stderr, NULL, _IOLBF, 0);
+        }
+    }
+
     pthread_t audio_thr, rec_thr;
     pthread_create(&audio_thr, NULL, audio_thread_main,    &aargs);
     pthread_create(&rec_thr,   NULL, recorder_thread_main, &rargs);
@@ -178,5 +199,11 @@ int main(int argc, char **argv) {
     pthread_join(audio_thr, NULL);
     pthread_join(rec_thr,   NULL);
     ring_free(&ring);
+
+    if (saved_stderr >= 0) {
+        fflush(stderr);
+        dup2(saved_stderr, STDERR_FILENO);
+        close(saved_stderr);
+    }
     return 0;
 }
