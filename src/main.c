@@ -22,6 +22,7 @@ void app_state_init(app_state_t *s) {
     atomic_init(&s->rec_request, 0);
     atomic_init(&s->rec_state, REC_IDLE);
     atomic_init(&s->xrun_count, 0);
+    atomic_init(&s->clip_count, 0);
     atomic_init(&s->encoder_active, 0);
     atomic_init(&s->frames_recorded, 0);
     atomic_init(&s->negotiated_rate, 0);
@@ -73,7 +74,7 @@ static int run_probe(audio_args_t *aargs) {
     fprintf(stderr,
             "probe: capturing for 3s — make some noise (clap, speak, drop the needle).\n");
     fprintf(stderr,
-            "  t(ms)   block_seq    peak_l    peak_r    rms_l    rms_r   xruns\n");
+            "  t(ms)   block_seq    peak_l    peak_r    rms_l    rms_r   xruns   clips\n");
 
     struct timespec slp = { .tv_sec = 0, .tv_nsec = 200 * 1000 * 1000 };
     for (int i = 0; i < 15 && !atomic_load(&g_state.quit); i++) {
@@ -84,8 +85,9 @@ static int run_probe(audio_args_t *aargs) {
         int rr = atomic_load(&g_state.rms_right_q15);
         unsigned long seq = (unsigned long)atomic_load(&g_state.block_seq);
         int xr = atomic_load(&g_state.xrun_count);
-        fprintf(stderr, "  %5d   %9lu  %8d  %8d  %7d  %7d  %6d\n",
-                (i + 1) * 200, seq, pl, pr, rl, rr, xr);
+        int cl = atomic_load(&g_state.clip_count);
+        fprintf(stderr, "  %5d   %9lu  %8d  %8d  %7d  %7d  %6d  %6d\n",
+                (i + 1) * 200, seq, pl, pr, rl, rr, xr, cl);
     }
 
     atomic_store(&g_state.quit, 1);

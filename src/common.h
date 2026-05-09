@@ -33,6 +33,7 @@ typedef struct {
     _Atomic int      rec_request;     // UI -> recorder: 0 = none, 1 = start, 2 = stop, 3 = split
     _Atomic int      rec_state;       // recorder -> UI: rec_state_t
     _Atomic int      xrun_count;      // capture overruns
+    _Atomic int      clip_count;      // ADC clip events (see CLIP_RUN_SAMPLES)
     _Atomic int      encoder_active;  // 0/1, recorder publishes
     _Atomic uint64_t frames_recorded; // recorder publishes; resets on each new file
     _Atomic unsigned negotiated_rate; // audio thread publishes once device is open; 0 until then

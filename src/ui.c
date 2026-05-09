@@ -172,6 +172,7 @@ void ui_run(ui_args_t *args) {
             int enc = atomic_load(&args->st->encoder_active);
             unsigned long fr = (unsigned long)atomic_load(&args->st->frames_recorded);
             int xrun = atomic_load(&args->st->xrun_count);
+            int clip = atomic_load(&args->st->clip_count);
 
             if (rs == REC_RUNNING && last_state != REC_RUNNING)
                 rec_started_at = t;
@@ -180,8 +181,9 @@ void ui_run(ui_args_t *args) {
             double elapsed = (rs == REC_RUNNING) ? (t - rec_started_at)
                                                   : (double)fr / (double)display_rate;
 
-            mvprintw(7, 0, "state: %-8s  elapsed: %6.1f s  frames: %lu  xruns: %d",
-                     state_str(rs, enc), elapsed, fr, xrun);
+            mvprintw(7, 0,
+                     "state: %-8s  elapsed: %6.1f s  frames: %lu  xruns: %d  clips: %d",
+                     state_str(rs, enc), elapsed, fr, xrun, clip);
 
             mvprintw(rows - 1, 0, "[r] start/stop   [n] new track   [q] quit");
         }

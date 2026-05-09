@@ -432,12 +432,14 @@ static OSStatus input_cb(void *ud,
     }
 
     float pl, rl, pr, rr;
-    block_stats_s16_stereo(dst, (size_t)nframes, &pl, &rl, &pr, &rr);
+    int clips = 0;
+    block_stats_s16_stereo(dst, (size_t)nframes, &pl, &rl, &pr, &rr, &clips);
     atomic_store(&c->args->st->peak_left,    (int)pl);
     atomic_store(&c->args->st->peak_right,   (int)pr);
     atomic_store(&c->args->st->rms_left_q15, (int)rl);
     atomic_store(&c->args->st->rms_right_q15,(int)rr);
     atomic_fetch_add(&c->args->st->block_seq, 1);
+    if (clips > 0) atomic_fetch_add(&c->args->st->clip_count, clips);
 
     size_t want = (size_t)nframes * CHANNELS;
     size_t wrote = ring_write(c->args->ring, dst, want);

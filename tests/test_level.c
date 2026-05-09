@@ -19,28 +19,115 @@ TEST(block_stats_constant_signal) {
     int16_t s[8] = { 10000, -20000,  10000, -20000,
                      10000, -20000,  10000, -20000 };
     float pl, rl, pr, rr;
-    block_stats_s16_stereo(s, 4, &pl, &rl, &pr, &rr);
+    int clips;
+    block_stats_s16_stereo(s, 4, &pl, &rl, &pr, &rr, &clips);
     ASSERT_NEAR(pl, 10000.0f, 1.0f);
     ASSERT_NEAR(pr, 20000.0f, 1.0f);
     ASSERT_NEAR(rl, 10000.0f, 1.0f);
     ASSERT_NEAR(rr, 20000.0f, 1.0f);
+    ASSERT_EQ_LL(clips, 0);
 }
 
 TEST(block_stats_silence) {
     int16_t s[8] = { 0 };
     float pl, rl, pr, rr;
-    block_stats_s16_stereo(s, 4, &pl, &rl, &pr, &rr);
+    int clips;
+    block_stats_s16_stereo(s, 4, &pl, &rl, &pr, &rr, &clips);
     ASSERT_NEAR(pl, 0.0f, 0.001f);
     ASSERT_NEAR(rl, 0.0f, 0.001f);
+    ASSERT_EQ_LL(clips, 0);
 }
 
 TEST(block_stats_handles_int16_min) {
     // INT16_MIN's absolute value is 32768 — must not overflow.
     int16_t s[2] = { -32768, -32768 };
     float pl, rl, pr, rr;
-    block_stats_s16_stereo(s, 1, &pl, &rl, &pr, &rr);
+    int clips;
+    block_stats_s16_stereo(s, 1, &pl, &rl, &pr, &rr, &clips);
     ASSERT_NEAR(pl, 32768.0f, 1.0f);
     ASSERT_NEAR(pr, 32768.0f, 1.0f);
+    // Single saturated sample is below the run threshold (3) so no event.
+    ASSERT_EQ_LL(clips, 0);
+}
+
+TEST(clip_below_threshold_no_event) {
+    // 10 frames near full-scale but not saturated: peak = 32766 < 32767.
+    int16_t s[20];
+    for (int i = 0; i < 20; i++) s[i] = 32766;
+    float pl, rl, pr, rr;
+    int clips;
+    block_stats_s16_stereo(s, 10, &pl, &rl, &pr, &rr, &clips);
+    ASSERT_EQ_LL(clips, 0);
+}
+
+TEST(clip_two_consecutive_no_event) {
+    // 2 saturated samples on L is below the 3-sample run threshold.
+    int16_t s[8] = {
+        32767, 0,
+        32767, 0,
+        0,     0,
+        0,     0,
+    };
+    float pl, rl, pr, rr;
+    int clips;
+    block_stats_s16_stereo(s, 4, &pl, &rl, &pr, &rr, &clips);
+    ASSERT_EQ_LL(clips, 0);
+}
+
+TEST(clip_three_consecutive_one_event) {
+    int16_t s[8] = {
+        32767, 0,
+        32767, 0,
+        32767, 0,
+        0,     0,
+    };
+    float pl, rl, pr, rr;
+    int clips;
+    block_stats_s16_stereo(s, 4, &pl, &rl, &pr, &rr, &clips);
+    ASSERT_EQ_LL(clips, 1);
+}
+
+TEST(clip_long_run_still_one_event) {
+    // 50 consecutive saturated samples on R = a single sustained clip event.
+    int16_t s[100] = { 0 };
+    for (int i = 0; i < 50; i++) s[i * 2 + 1] = -32768;
+    float pl, rl, pr, rr;
+    int clips;
+    block_stats_s16_stereo(s, 50, &pl, &rl, &pr, &rr, &clips);
+    ASSERT_EQ_LL(clips, 1);
+}
+
+TEST(clip_two_separate_runs_two_events) {
+    // Two distinct 3-sample runs on L separated by a non-saturated sample.
+    int16_t s[16] = {
+        32767, 0,
+        32767, 0,
+        32767, 0,
+        0,     0,        // breaks the run
+        32767, 0,
+        32767, 0,
+        32767, 0,
+        0,     0,
+    };
+    float pl, rl, pr, rr;
+    int clips;
+    block_stats_s16_stereo(s, 8, &pl, &rl, &pr, &rr, &clips);
+    ASSERT_EQ_LL(clips, 2);
+}
+
+TEST(clip_both_channels_simultaneous_two_events) {
+    // 3 saturated samples on both L and R at the same time = 2 events
+    // (one per channel).
+    int16_t s[8] = {
+        32767, -32768,
+        32767, -32768,
+        32767, -32768,
+        0,     0,
+    };
+    float pl, rl, pr, rr;
+    int clips;
+    block_stats_s16_stereo(s, 4, &pl, &rl, &pr, &rr, &clips);
+    ASSERT_EQ_LL(clips, 2);
 }
 
 TEST(ppm_attack_then_release) {
@@ -76,6 +163,12 @@ void run_level_tests(void) {
     RUN(block_stats_constant_signal);
     RUN(block_stats_silence);
     RUN(block_stats_handles_int16_min);
+    RUN(clip_below_threshold_no_event);
+    RUN(clip_two_consecutive_no_event);
+    RUN(clip_three_consecutive_one_event);
+    RUN(clip_long_run_still_one_event);
+    RUN(clip_two_separate_runs_two_events);
+    RUN(clip_both_channels_simultaneous_two_events);
     RUN(ppm_attack_then_release);
     RUN(ppm_hold_captures_peak);
 }

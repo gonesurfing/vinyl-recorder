@@ -125,12 +125,14 @@ void *audio_thread_main(void *arg) {
 
         // Publish per-block stats for the meter.
         float pl, rl, pr, rr;
-        block_stats_s16_stereo(block, (size_t)got, &pl, &rl, &pr, &rr);
+        int clips = 0;
+        block_stats_s16_stereo(block, (size_t)got, &pl, &rl, &pr, &rr, &clips);
         atomic_store(&a->st->peak_left,    (int)pl);
         atomic_store(&a->st->peak_right,   (int)pr);
         atomic_store(&a->st->rms_left_q15, (int)rl);
         atomic_store(&a->st->rms_right_q15,(int)rr);
         atomic_fetch_add(&a->st->block_seq, 1);
+        if (clips > 0) atomic_fetch_add(&a->st->clip_count, clips);
 
         // Push to ring. If full, oldest data was meant to be drained by
         // the recorder; on the rare "ring full" we drop the new block and

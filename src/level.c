@@ -12,9 +12,15 @@ float dbfs_from_linear(float linear) {
 
 void block_stats_s16_stereo(const int16_t *samples, size_t frames,
                             float *peak_l, float *rms_l,
-                            float *peak_r, float *rms_r) {
+                            float *peak_r, float *rms_r,
+                            int *clip_events) {
     int32_t pl = 0, pr = 0;
     double sl = 0.0, sr = 0.0;
+    // Per-channel running count of consecutive saturated samples and a flag
+    // tracking whether the current run has already been counted as an event.
+    int run_l = 0, run_r = 0;
+    int counted_l = 0, counted_r = 0;
+    int events = 0;
     for (size_t i = 0; i < frames; i++) {
         int32_t a = samples[i * 2 + 0];
         int32_t b = samples[i * 2 + 1];
@@ -24,12 +30,24 @@ void block_stats_s16_stereo(const int16_t *samples, size_t frames,
         if (bb > pr) pr = bb;
         sl += (double)a * (double)a;
         sr += (double)b * (double)b;
+
+        if (aa >= 32767) {
+            if (++run_l >= CLIP_RUN_SAMPLES && !counted_l) { events++; counted_l = 1; }
+        } else {
+            run_l = 0; counted_l = 0;
+        }
+        if (bb >= 32767) {
+            if (++run_r >= CLIP_RUN_SAMPLES && !counted_r) { events++; counted_r = 1; }
+        } else {
+            run_r = 0; counted_r = 0;
+        }
     }
     double n = (double)(frames > 0 ? frames : 1);
     *peak_l = (float)pl;
     *peak_r = (float)pr;
     *rms_l  = (float)sqrt(sl / n);
     *rms_r  = (float)sqrt(sr / n);
+    if (clip_events) *clip_events = events;
 }
 
 #define PPM_ATTACK_TC   0.010f
