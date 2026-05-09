@@ -569,6 +569,7 @@ void *audio_thread_main(void *arg) {
     fprintf(stderr,
             "CoreAudio: capture started @ %u Hz, max_frames=%u, device_channels=%u\n",
             a->rate, (unsigned)max_frames, (unsigned)dev_ch);
+    atomic_store(&a->st->negotiated_rate, (unsigned)a->rate);
 
     // Block until shutdown — capture happens on the CoreAudio RT thread.
     // Surface the first AudioUnitRender error code (and any change after that)

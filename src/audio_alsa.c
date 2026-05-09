@@ -95,6 +95,7 @@ void *audio_thread_main(void *arg) {
     }
     fprintf(stderr, "ALSA: %s @ %u Hz, period=%lu frames, periods=%u\n",
             a->device, rate, (unsigned long)period_frames, periods);
+    atomic_store(&a->st->negotiated_rate, rate);
 
     int16_t *block = (int16_t *)calloc(period_frames * CHANNELS, sizeof(int16_t));
     if (!block) {

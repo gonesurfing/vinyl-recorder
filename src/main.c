@@ -24,6 +24,7 @@ void app_state_init(app_state_t *s) {
     atomic_init(&s->xrun_count, 0);
     atomic_init(&s->encoder_active, 0);
     atomic_init(&s->frames_recorded, 0);
+    atomic_init(&s->negotiated_rate, 0);
     atomic_init(&s->peak_left, 0);
     atomic_init(&s->peak_right, 0);
     atomic_init(&s->rms_left_q15, 0);

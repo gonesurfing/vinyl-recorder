@@ -198,8 +198,21 @@ void *recorder_thread_main(void *arg) {
         return NULL;
     }
 
+    // Wait for the audio thread to publish the rate the device actually
+    // negotiated. ALSA's set_rate_near can snap to a neighboring rate, and
+    // tagging the WAV with the requested rate when capture is at a different
+    // rate produces files that play back at the wrong pitch.
+    unsigned int rate = 0;
+    while (!atomic_load(&st->quit)) {
+        rate = atomic_load(&st->negotiated_rate);
+        if (rate != 0) break;
+        struct timespec ts = { 0, 5 * 1000 * 1000 };
+        nanosleep(&ts, NULL);
+    }
+    if (rate == 0) return NULL;  // audio thread bailed before opening device
+
     lookback_t lb;
-    size_t lb_samples = (size_t)(PREROLL_SECONDS * a->rate) * CHANNELS;
+    size_t lb_samples = (size_t)(PREROLL_SECONDS * rate) * CHANNELS;
     if (lookback_init(&lb, lb_samples) != 0) {
         atomic_store(&st->quit, 1);
         return NULL;
@@ -226,7 +239,7 @@ void *recorder_thread_main(void *arg) {
         if (req == 1 && state == REC_IDLE) {
             // start
             make_filename(wav_path, sizeof(wav_path), a->output_dir);
-            wav = wav_open(wav_path, a->rate, CHANNELS);
+            wav = wav_open(wav_path, (int)rate, CHANNELS);
             if (wav) {
                 size_t n = lookback_size(&lb);
                 if (n > 0) {
@@ -251,7 +264,7 @@ void *recorder_thread_main(void *arg) {
             if (flac_spawn(wav_path, &encoder_pid) == 0)
                 atomic_store(&st->encoder_active, 1);
             make_filename(wav_path, sizeof(wav_path), a->output_dir);
-            wav = wav_open(wav_path, a->rate, CHANNELS);
+            wav = wav_open(wav_path, (int)rate, CHANNELS);
             atomic_store(&st->frames_recorded, 0);
         }
 

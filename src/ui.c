@@ -145,9 +145,15 @@ void ui_run(ui_args_t *args) {
             int bar_col   = 4;
             int bar_width = cols - bar_col - 14;
 
+            // Prefer the rate the audio thread actually negotiated (ALSA may
+            // snap to a neighboring rate); fall back to the requested rate
+            // until the audio thread has opened the device.
+            unsigned neg = atomic_load(&args->st->negotiated_rate);
+            int display_rate = (neg != 0) ? (int)neg : args->rate;
+
             mvprintw(0, 0, "%s %s", APP_NAME, APP_VERSION);
             mvprintw(0, cols - 30, "device: %s", args->device);
-            mvprintw(1, 0, "rate: %d Hz   output: %s", args->rate, args->output_dir);
+            mvprintw(1, 0, "rate: %d Hz   output: %s", display_rate, args->output_dir);
 
             draw_scale(stdscr, 3, bar_col, bar_width);
 
@@ -171,7 +177,7 @@ void ui_run(ui_args_t *args) {
             last_state = rs;
 
             double elapsed = (rs == REC_RUNNING) ? (t - rec_started_at)
-                                                  : (double)fr / (double)args->rate;
+                                                  : (double)fr / (double)display_rate;
 
             mvprintw(7, 0, "state: %-8s  elapsed: %6.1f s  frames: %lu  xruns: %d",
                      state_str(rs, enc), elapsed, fr, xrun);

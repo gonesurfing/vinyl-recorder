@@ -35,6 +35,7 @@ typedef struct {
     _Atomic int      xrun_count;      // capture overruns
     _Atomic int      encoder_active;  // 0/1, recorder publishes
     _Atomic uint64_t frames_recorded; // recorder publishes; resets on each new file
+    _Atomic unsigned negotiated_rate; // audio thread publishes once device is open; 0 until then
 
     // Latest block stats from the capture thread, per channel.
     // Stored as raw int32 (peak abs sample) and float (RMS).
