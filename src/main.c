@@ -151,6 +151,15 @@ int main(int argc, char **argv) {
         return rc;
     }
 
+    if (flac_check_available() != 0) {
+        fprintf(stderr,
+                "error: `flac` not found on PATH. Install it (e.g. "
+                "`sudo apt install flac` on Debian/Raspberry Pi OS, "
+                "`brew install flac` on macOS) and try again.\n");
+        ring_free(&ring);
+        return 1;
+    }
+
     recorder_args_t rargs = {
         .ring = &ring, .st = &g_state, .output_dir = cfg.output_dir, .rate = (int)cfg.rate,
     };

@@ -40,6 +40,10 @@ void *recorder_thread_main(void *arg);
 
 #include <sys/types.h>
 
+// Returns 0 if the `flac` encoder is on PATH and runs, -1 otherwise.
+// Synchronous; intended for a one-shot startup check.
+int  flac_check_available(void);
+
 // Spawn `flac --best --silent --delete-input-file <wav_path>`. On success,
 // returns 0 and writes the child pid into *out_pid. The WAV file is deleted
 // by flac after a successful encode; the resulting FLAC sits next to it.

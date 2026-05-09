@@ -6,9 +6,11 @@
 #include <spawn.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include <fcntl.h>
 #include <errno.h>
 #include <time.h>
 #include <pthread.h>
+#include <unistd.h>
 
 extern char **environ;
 
@@ -108,6 +110,22 @@ int sndfile_read_int16_for_test(const char *path, int16_t *out,
 
 // --- FLAC spawn / poll ---------------------------------------------------
 
+int flac_check_available(void) {
+    char *argv[] = { "flac", "--version", NULL };
+    posix_spawn_file_actions_t fa;
+    if (posix_spawn_file_actions_init(&fa) != 0) return -1;
+    posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+    posix_spawn_file_actions_addopen(&fa, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
+    pid_t pid = 0;
+    int rc = posix_spawnp(&pid, "flac", &fa, NULL, argv, environ);
+    posix_spawn_file_actions_destroy(&fa);
+    if (rc != 0) return -1;
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) return -1;
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return -1;
+    return 0;
+}
+
 int flac_spawn(const char *wav_path, pid_t *out_pid) {
     char *argv[] = {
         "flac", "--best", "--silent", "--delete-input-file",
@@ -116,6 +134,10 @@ int flac_spawn(const char *wav_path, pid_t *out_pid) {
     pid_t pid = 0;
     int rc = posix_spawnp(&pid, "flac", NULL, NULL, argv, environ);
     if (rc != 0) {
+        fprintf(stderr,
+                "flac: failed to launch encoder for %s: %s "
+                "(is the `flac` package installed?)\n",
+                wav_path, strerror(rc));
         errno = rc;
         return -1;
     }
@@ -129,8 +151,20 @@ int flac_poll(pid_t *pid) {
     pid_t r = waitpid(*pid, &status, WNOHANG);
     if (r == 0) return 0;
     if (r < 0)  return -1;
+    pid_t reaped = *pid;
     *pid = 0;
     if (WIFEXITED(status) && WEXITSTATUS(status) == 0) return 1;
+    if (WIFEXITED(status)) {
+        fprintf(stderr,
+                "flac: encoder pid %d exited with status %d; "
+                "WAV file was left behind\n",
+                (int)reaped, WEXITSTATUS(status));
+    } else if (WIFSIGNALED(status)) {
+        fprintf(stderr,
+                "flac: encoder pid %d killed by signal %d; "
+                "WAV file was left behind\n",
+                (int)reaped, WTERMSIG(status));
+    }
     return -1;
 }
 
