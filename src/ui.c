@@ -43,7 +43,8 @@ static int dbfs_to_col(float db, int width) {
     if (db < -60.0f) s = (db + 90.0f) / 30.0f * 0.25f;
     else             s = 0.25f + (db + 60.0f) / 60.0f * 0.75f;
     int c = (int)(s * (width - 1));
-    if (c < 0) c = 0; if (c > width - 1) c = width - 1;
+    if (c < 0) c = 0;
+    if (c > width - 1) c = width - 1;
     return c;
 }
 
