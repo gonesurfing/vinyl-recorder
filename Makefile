@@ -14,7 +14,9 @@ ifeq ($(UNAME_S),Darwin)
 else
   AUDIO_SRC      := src/audio_alsa.c
   PKGS_APP       := alsa ncursesw sndfile
-  PLAT_LIBS      :=
+  # libatomic provides __atomic_*_8 helpers needed for _Atomic uint64_t on
+  # 32-bit ARM (e.g. Raspberry Pi OS armhf). Harmless on x86_64.
+  PLAT_LIBS      := -latomic
   PKG_CFLAGS_APP := $(shell pkg-config --cflags $(PKGS_APP))
   PKG_LIBS_APP   := $(shell pkg-config --libs   $(PKGS_APP))
 endif
