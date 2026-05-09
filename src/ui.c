@@ -72,7 +72,7 @@ static void draw_bar(WINDOW *w, int row, int col, int width,
 }
 
 static void draw_scale(WINDOW *w, int row, int col, int width) {
-    static const int marks[] = { -90, -60, -40, -30, -20, -18, -12, -6, -3, 0 };
+    static const int marks[] = { -90, -60, -40, -30, -18, -12, -6, -3, 0 };
     for (size_t i = 0; i < sizeof(marks)/sizeof(marks[0]); i++) {
         int c = dbfs_to_col((float)marks[i], width);
         char tmp[8];
@@ -104,6 +104,14 @@ void ui_run(ui_args_t *args) {
     nodelay(stdscr, TRUE);
     curs_set(0);
     init_colors();
+
+    // The audio + recorder threads start before initscr() and may fprintf to
+    // stderr (e.g. CoreAudio init messages) while ncurses is taking over the
+    // terminal. ncurses doesn't see those writes, so its internal screen
+    // model is stale and the first frame leaves residue. Force a full
+    // clear+repaint on the first refresh — same thing ncurses does
+    // internally on SIGWINCH, which is why a resize "fixes" it.
+    clearok(stdscr, TRUE);
 
     ppm_t lp, rp;
     ppm_init(&lp);
