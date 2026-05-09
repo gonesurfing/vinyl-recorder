@@ -128,7 +128,7 @@ int flac_check_available(void) {
 
 int flac_spawn(const char *wav_path, pid_t *out_pid) {
     char *argv[] = {
-        "flac", "--best", "--silent", "--delete-input-file",
+        "flac", "-5", "--silent", "--delete-input-file",
         (char *)wav_path, NULL,
     };
     pid_t pid = 0;
