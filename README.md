@@ -84,6 +84,48 @@ make test
 The test suite only depends on `libsndfile` (for a WAV round-trip
 check), so it builds on any host even without ALSA installed.
 
+## Real-time priority (Linux / Raspberry Pi)
+
+The capture thread asks for `SCHED_FIFO` scheduling so that other work on
+the box (an ssh or tmux reattach redrawing the screen, `flac` encoding,
+SD-card writeback) can't starve it into an overrun. The ALSA buffer is
+also ~500 ms deep, giving extra headroom either way. Check
+`~/recordings/vinyl_recorder.log` at startup to see whether you got it:
+
+```
+ALSA: capture thread at SCHED_FIFO priority 60
+```
+
+If instead it says `could not get real-time priority`, grant it one of
+two ways:
+
+**Option A, rtprio limit (persists across rebuilds).** Put your user in
+the `audio` group and allow that group real-time priority:
+
+```sh
+sudo usermod -aG audio "$USER"
+echo '@audio - rtprio 95' | sudo tee /etc/security/limits.d/99-audio-rt.conf
+```
+
+Log out and back in, and confirm with `ulimit -r` (it should print `95`).
+A tmux server that was already running keeps the old limits. Run
+`tmux kill-server` and start a new one.
+
+**Option B, file capability (must be redone after every `make`):**
+
+```sh
+sudo setcap cap_sys_nice+ep ./vinyl_recorder
+```
+
+Every xrun is also written to the log with its cause. *ALSA capture
+overrun* means the capture thread was starved. *Ring full* means the
+recorder thread stalled writing to disk for over ~2 s.
+
+On Raspberry Pi OS Bookworm the `default` device goes through PipeWire,
+which has its own buffering. To capture straight from the hardware,
+pass the card name, for example `-d plughw:CARD=CODEC` (list the names
+with `-L`).
+
 ## Layout
 
 ```

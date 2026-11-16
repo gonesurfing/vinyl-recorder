@@ -11,7 +11,14 @@
 #define DEFAULT_RATE        44100
 #define CHANNELS            2
 #define PERIOD_FRAMES       1024
-#define PERIODS             4
+// Total ALSA capture buffer. Latency is irrelevant for a recorder, so make
+// it deep: the capture thread can be starved this long (ssh/tmux reattach,
+// SD-card writeback on a Pi) before the hardware overruns. Period size, not
+// buffer size, sets how often the meters update.
+#define BUFFER_TIME_US      500000
+// SCHED_FIFO priority for the capture thread (Linux). Moderate on purpose:
+// above every SCHED_OTHER task, below kernel housekeeping at 99.
+#define AUDIO_RT_PRIORITY   60
 #define PREROLL_SECONDS     3.0f
 #define UI_REFRESH_HZ       30
 #define SAMPLE_FULL_SCALE   32768.0f

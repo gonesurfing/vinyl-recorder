@@ -1,6 +1,8 @@
 #include "audio.h"
 #include "level.h"
 #include <alsa/asoundlib.h>
+#include <pthread.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -64,18 +66,42 @@ static int configure_pcm(snd_pcm_t *pcm, unsigned int *rate,
     snd_pcm_uframes_t pf = PERIOD_FRAMES;
     if ((rc = snd_pcm_hw_params_set_period_size_near(pcm, hw, &pf, NULL)) < 0) return rc;
 
-    unsigned int pn = PERIODS;
-    if ((rc = snd_pcm_hw_params_set_periods_near(pcm, hw, &pn, NULL)) < 0) return rc;
+    unsigned int bt = BUFFER_TIME_US;
+    if ((rc = snd_pcm_hw_params_set_buffer_time_near(pcm, hw, &bt, NULL)) < 0) return rc;
 
     if ((rc = snd_pcm_hw_params(pcm, hw)) < 0) return rc;
+
+    // Read back what the device actually granted.
+    unsigned int pn = 0;
+    snd_pcm_hw_params_get_period_size(hw, &pf, NULL);
+    snd_pcm_hw_params_get_periods(hw, &pn, NULL);
 
     *period_frames = pf;
     *periods_out = pn;
     return 0;
 }
 
+// Ask for real-time scheduling so a burst of other work (sshd/tmux redraw on
+// reattach, flac encoding, writeback) can't starve the capture loop. Needs
+// CAP_SYS_NICE or an rtprio rlimit; without either we keep running at normal
+// priority and say so in the log.
+static void try_realtime(void) {
+    struct sched_param sp = { .sched_priority = AUDIO_RT_PRIORITY };
+    int rc = pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
+    if (rc == 0) {
+        fprintf(stderr, "ALSA: capture thread at SCHED_FIFO priority %d\n",
+                AUDIO_RT_PRIORITY);
+    } else {
+        fprintf(stderr,
+                "ALSA: could not get real-time priority (%s); capture thread "
+                "runs at normal priority. See README \"Real-time priority\".\n",
+                strerror(rc));
+    }
+}
+
 void *audio_thread_main(void *arg) {
     audio_args_t *a = (audio_args_t *)arg;
+    try_realtime();
     snd_pcm_t *pcm = NULL;
     int rc = snd_pcm_open(&pcm, a->device, SND_PCM_STREAM_CAPTURE, 0);
     if (rc < 0) {
@@ -93,8 +119,9 @@ void *audio_thread_main(void *arg) {
         atomic_store(&a->st->quit, 1);
         return NULL;
     }
-    fprintf(stderr, "ALSA: %s @ %u Hz, period=%lu frames, periods=%u\n",
-            a->device, rate, (unsigned long)period_frames, periods);
+    fprintf(stderr, "ALSA: %s @ %u Hz, period=%lu frames, periods=%u (%.0f ms buffer)\n",
+            a->device, rate, (unsigned long)period_frames, periods,
+            1000.0 * (double)period_frames * periods / rate);
     atomic_store(&a->st->negotiated_rate, rate);
 
     int16_t *block = (int16_t *)calloc(period_frames * CHANNELS, sizeof(int16_t));
@@ -109,7 +136,8 @@ void *audio_thread_main(void *arg) {
     while (!atomic_load(&a->st->quit)) {
         snd_pcm_sframes_t got = snd_pcm_readi(pcm, block, period_frames);
         if (got == -EPIPE) {
-            atomic_fetch_add(&a->st->xrun_count, 1);
+            int n = atomic_fetch_add(&a->st->xrun_count, 1) + 1;
+            fprintf(stderr, "xrun #%d: ALSA capture overrun (capture thread starved)\n", n);
             snd_pcm_prepare(pcm);
             continue;
         }
@@ -139,7 +167,11 @@ void *audio_thread_main(void *arg) {
         // count it as an xrun so the user sees it.
         size_t want = (size_t)got * CHANNELS;
         size_t wrote = ring_write(a->ring, block, want);
-        if (wrote < want) atomic_fetch_add(&a->st->xrun_count, 1);
+        if (wrote < want) {
+            int n = atomic_fetch_add(&a->st->xrun_count, 1) + 1;
+            fprintf(stderr, "xrun #%d: ring full, dropped %zu frames (recorder thread stalled)\n",
+                    n, (want - wrote) / CHANNELS);
+        }
     }
 
     free(block);
