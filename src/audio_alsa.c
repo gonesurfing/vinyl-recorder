@@ -1,5 +1,6 @@
 #include "audio.h"
 #include "level.h"
+#include "rate_mon.h"
 #include "sample.h"
 #include <alsa/asoundlib.h>
 #include <pthread.h>
@@ -7,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 unsigned audio_pick_rate(const char *device, unsigned requested) {
     // ALSA negotiates rate per-stream and the plug/dmix layer handles
@@ -128,6 +130,41 @@ static void try_realtime(void) {
     }
 }
 
+// Unslewed by NTP where available, so time-sync adjustments on the Pi don't
+// show up as a fake sample-rate error.
+static double mono_seconds(void) {
+    struct timespec ts;
+#ifdef CLOCK_MONOTONIC_RAW
+    clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+#else
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+#endif
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
+// Once a second: publish the capture-rate estimate and log when it crosses
+// the warning threshold (with hysteresis, so it doesn't flap).
+static void report_rate(rate_mon_t *mon, app_state_t *st, bool *warned) {
+    double ppm;
+    if (!rate_mon_ppm(mon, &ppm)) {
+        atomic_store(&st->rate_ppm_valid, 0);
+        return;
+    }
+    atomic_store(&st->rate_ppm, (int)(ppm < 0 ? ppm - 0.5 : ppm + 0.5));
+    atomic_store(&st->rate_ppm_valid, 1);
+    if (!*warned && rate_mon_suspect(ppm)) {
+        *warned = true;
+        fprintf(stderr,
+                "capture: device delivering %+.0f ppm vs system clock. Audio is "
+                "being lost without an xrun (for a USB device, ~%.1f lost 1 ms "
+                "packets/s). See README \"Raspberry Pi model and USB audio\".\n",
+                ppm, ppm < 0 ? -ppm / 1000.0 : 0.0);
+    } else if (*warned && !rate_mon_suspect(ppm * 1.5)) {
+        *warned = false;
+        fprintf(stderr, "capture: rate back to normal (%+.0f ppm)\n", ppm);
+    }
+}
+
 void *audio_thread_main(void *arg) {
     audio_args_t *a = (audio_args_t *)arg;
     try_realtime();
@@ -162,13 +199,20 @@ void *audio_thread_main(void *arg) {
     size_t nsamp = (size_t)period_frames * CHANNELS;
     void     *raw   = calloc(nsamp, 4);
     sample_t *block = (sample_t *)calloc(nsamp, sizeof(sample_t));
-    if (!raw || !block) {
+    rate_mon_t *mon = (rate_mon_t *)malloc(sizeof *mon);
+    if (!raw || !block || !mon) {
         free(raw);
         free(block);
+        free(mon);
         snd_pcm_close(pcm);
         atomic_store(&a->st->quit, 1);
         return NULL;
     }
+
+    rate_mon_init(mon, rate);
+    uint64_t frames_total = 0;
+    double next_report = 0.0;
+    bool rate_warned = false;
 
     snd_pcm_prepare(pcm);
 
@@ -178,6 +222,7 @@ void *audio_thread_main(void *arg) {
             int n = atomic_fetch_add(&a->st->xrun_count, 1) + 1;
             fprintf(stderr, "xrun #%d: ALSA capture overrun (capture thread starved)\n", n);
             snd_pcm_prepare(pcm);
+            rate_mon_reset(mon);   // frames were lost; the count jumps
             continue;
         }
         if (got == -EAGAIN) continue;
@@ -187,7 +232,19 @@ void *audio_thread_main(void *arg) {
                 fprintf(stderr, "snd_pcm_readi: %s\n", snd_strerror((int)got));
                 break;
             }
+            rate_mon_reset(mon);
             continue;
+        }
+
+        // Frames delivered so far, as of now: what we've read plus what is
+        // already waiting, so a late wakeup doesn't skew the estimate.
+        frames_total += (uint64_t)got;
+        snd_pcm_sframes_t waiting = snd_pcm_avail(pcm);
+        double now = mono_seconds();
+        rate_mon_add(mon, now, frames_total + (waiting > 0 ? (uint64_t)waiting : 0));
+        if (now >= next_report) {
+            next_report = now + 1.0;
+            report_rate(mon, a->st, &rate_warned);
         }
 
         size_t got_samples = (size_t)got * CHANNELS;
@@ -222,6 +279,7 @@ void *audio_thread_main(void *arg) {
 
     free(raw);
     free(block);
+    free(mon);
     snd_pcm_close(pcm);
     return NULL;
 }

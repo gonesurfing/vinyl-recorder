@@ -1,6 +1,7 @@
 #define _XOPEN_SOURCE_EXTENDED 1
 #include "ui.h"
 #include "level.h"
+#include "rate_mon.h"
 #include <locale.h>
 #if defined(__APPLE__)
 #include <ncurses.h>
@@ -191,6 +192,20 @@ void ui_run(ui_args_t *args) {
             mvprintw(7, 0,
                      "state: %-8s  elapsed: %6.1f s  frames: %lu  xruns: %d  clips: %d",
                      state_str(rs, enc), elapsed, fr, xrun, clip);
+
+            // Capture rate vs system clock: a big deficit means the device is
+            // silently losing audio (USB packet loss on a Pi 2/3).
+            if (rows > 9 && atomic_load(&args->st->rate_ppm_valid)) {
+                int ppm = atomic_load(&args->st->rate_ppm);
+                if (rate_mon_suspect((double)ppm)) {
+                    attron(COLOR_PAIR(COLOR_PAIR_RED) | A_BOLD);
+                    mvprintw(8, 0, "clock: %+d ppm  LOSING AUDIO (~%.1f dropouts/s), see log",
+                             ppm, ppm < 0 ? -ppm / 1000.0 : 0.0);
+                    attroff(COLOR_PAIR(COLOR_PAIR_RED) | A_BOLD);
+                } else {
+                    mvprintw(8, 0, "clock: %+d ppm  ok", ppm);
+                }
+            }
 
             mvprintw(rows - 1, 0, "[r] start/stop   [n] new track   [q] quit");
         }

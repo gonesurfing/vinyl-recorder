@@ -112,6 +112,20 @@ no xrun is counted, and the kernel log rarely reports it. Measured with a
 second, Pi 2 ~0.7 per second, Pi 4 none. Use a Pi 4 or newer, or an I2S
 interface such as a HiFiBerry ADC board, which doesn't go through USB.
 
+The recorder watches for this on Linux. It compares the frames the device
+delivers against the system clock over the last minute, and shows the
+difference in parts per million on the `clock:` line (after ~20 s of
+capture). Genuine clock mismatch between an interface and the Pi is well
+under 100 ppm. Each lost 1 ms packet per second adds about 1000 ppm of
+deficit. Past ±300 ppm the line turns red and the log records a warning
+like this:
+
+```
+capture: device delivering -712 ppm vs system clock. Audio is being lost without an xrun (for a USB device, ~0.7 lost 1 ms packets/s). ...
+```
+
+It can't tell you where the gaps are, only that the take has them.
+
 ## Real-time priority (Linux / Raspberry Pi)
 
 The capture thread asks for `SCHED_FIFO` scheduling so that other work on
@@ -164,11 +178,12 @@ src/
   audio_coreaudio.c  CoreAudio / AUHAL capture backend (macOS)
   ring.{c,h}         lock-free SPSC ring buffer (capture → recorder)
   sample.{c,h}       internal sample format (left-justified int32) + converters
+  rate_mon.{c,h}     capture rate vs system clock (detects silent USB packet loss)
   level.{c,h}        peak / RMS / dBFS conversion for the meters
   recorder.{c,h}     lookback buffer, WAV writer, FLAC spawn/poll
   ui.{c,h}           ncurses render loop + key handling
   common.h           shared types, app_state_t (atomic flags & meters)
-tests/               unit tests for ring, level, recorder
+tests/               unit tests for ring, level, recorder, sample, rate_mon
 ```
 
 Three threads, no locks on the audio path: the capture backend writes

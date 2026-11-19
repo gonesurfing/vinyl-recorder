@@ -28,6 +28,8 @@ void app_state_init(app_state_t *s) {
     atomic_init(&s->negotiated_rate, 0);
     atomic_init(&s->capture_bits, 0);
     atomic_init(&s->output_bits, 0);
+    atomic_init(&s->rate_ppm, 0);
+    atomic_init(&s->rate_ppm_valid, 0);
     atomic_init(&s->peak_left, 0);
     atomic_init(&s->peak_right, 0);
     atomic_init(&s->rms_left_q15, 0);

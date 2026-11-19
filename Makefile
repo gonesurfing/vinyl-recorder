@@ -28,12 +28,12 @@ PKG_LIBS_TEST   := $(shell pkg-config --libs   $(PKGS_TEST))
 CFLAGS  := $(CSTD) $(WARN) $(OPT) $(DEFINES) $(PKG_CFLAGS_APP) -Isrc
 LDFLAGS := -pthread -lm $(PKG_LIBS_APP) $(PLAT_LIBS)
 
-APP_SRCS := src/main.c src/ring.c src/sample.c src/level.c $(AUDIO_SRC) src/recorder.c src/ui.c
+APP_SRCS := src/main.c src/ring.c src/sample.c src/rate_mon.c src/level.c $(AUDIO_SRC) src/recorder.c src/ui.c
 APP_OBJS := $(APP_SRCS:.c=.o)
 
-TEST_LIB_SRCS := src/ring.c src/sample.c src/level.c src/recorder.c
+TEST_LIB_SRCS := src/ring.c src/sample.c src/rate_mon.c src/level.c src/recorder.c
 TEST_LIB_OBJS := $(TEST_LIB_SRCS:.c=.o)
-TEST_SRCS := tests/run_all.c tests/test_ring.c tests/test_level.c tests/test_recorder.c tests/test_sample.c
+TEST_SRCS := tests/run_all.c tests/test_ring.c tests/test_level.c tests/test_recorder.c tests/test_sample.c tests/test_rate_mon.c
 TEST_OBJS := $(TEST_SRCS:.c=.o)
 
 # Tests don't need ALSA or ncurses — only sndfile (for the WAV roundtrip test).

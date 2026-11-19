@@ -47,6 +47,8 @@ typedef struct {
     _Atomic unsigned negotiated_rate; // audio thread publishes once device is open; 0 until then
     _Atomic unsigned capture_bits;    // audio thread: device sample depth (16/24/32), stored before negotiated_rate
     _Atomic int      output_bits;     // recorder publishes the WAV depth it writes (16/24); 0 until known
+    _Atomic int      rate_ppm;        // capture rate vs system clock, ppm (negative = frames missing)
+    _Atomic int      rate_ppm_valid;  // 1 once rate_ppm has enough history (ALSA only)
 
     // Latest block stats from the capture thread, per channel.
     // Stored as raw int32 (peak abs sample) and float (RMS).
