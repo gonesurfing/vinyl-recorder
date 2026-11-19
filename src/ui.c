@@ -154,7 +154,14 @@ void ui_run(ui_args_t *args) {
 
             mvprintw(0, 0, "%s %s", APP_NAME, APP_VERSION);
             mvprintw(0, cols - 30, "device: %s", args->device);
-            mvprintw(1, 0, "rate: %d Hz   output: %s", display_rate, args->output_dir);
+            // Depth the recorder actually writes (16 for 16-bit devices even
+            // with -b 24); blank until the recorder has decided.
+            int bits = atomic_load(&args->st->output_bits);
+            if (bits > 0)
+                mvprintw(1, 0, "rate: %d Hz   %d-bit   output: %s",
+                         display_rate, bits, args->output_dir);
+            else
+                mvprintw(1, 0, "rate: %d Hz   output: %s", display_rate, args->output_dir);
 
             draw_scale(stdscr, 3, bar_col, bar_width);
 

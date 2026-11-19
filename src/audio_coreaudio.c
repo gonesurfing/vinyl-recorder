@@ -1,5 +1,6 @@
 #include "audio.h"
 #include "level.h"
+#include "sample.h"
 
 #include <AudioToolbox/AudioToolbox.h>
 #include <CoreAudio/CoreAudio.h>
@@ -16,8 +17,8 @@
 typedef struct {
     AudioUnit        au;
     AudioBufferList *abl;        // 1 buffer, points at au_scratch
-    int16_t         *au_scratch; // raw AU output: device_channels * max_frames samples
-    int16_t         *ring_block; // mixed-down stereo: 2 * max_frames samples
+    sample_t        *au_scratch; // raw AU output: device_channels * max_frames samples
+    sample_t        *ring_block; // mixed-down stereo: 2 * max_frames samples
     UInt32           max_frames;
     UInt32           device_channels; // 1, 2, or N — what the AU actually delivers
     _Atomic int      last_au_err;     // OSStatus from most recent AudioUnitRender failure
@@ -401,7 +402,7 @@ static OSStatus input_cb(void *ud,
     }
 
     c->abl->mBuffers[0].mDataByteSize =
-        (UInt32)(nframes * c->device_channels * sizeof(int16_t));
+        (UInt32)(nframes * c->device_channels * sizeof(sample_t));
 
     OSStatus r = AudioUnitRender(c->au, flags, ts, bus, nframes, c->abl);
     if (r != noErr) {
@@ -410,18 +411,18 @@ static OSStatus input_cb(void *ud,
         return noErr;
     }
 
-    const int16_t *src = (const int16_t *)c->abl->mBuffers[0].mData;
-    int16_t       *dst = c->ring_block;
+    const sample_t *src = (const sample_t *)c->abl->mBuffers[0].mData;
+    sample_t       *dst = c->ring_block;
 
     if (c->device_channels == 1) {
         // Mono → stereo: duplicate the single channel into both L and R.
         for (UInt32 i = 0; i < nframes; i++) {
-            int16_t s = src[i];
+            sample_t s = src[i];
             dst[2 * i + 0] = s;
             dst[2 * i + 1] = s;
         }
     } else if (c->device_channels == 2) {
-        memcpy(dst, src, (size_t)nframes * 2 * sizeof(int16_t));
+        memcpy(dst, src, (size_t)nframes * 2 * sizeof(sample_t));
     } else {
         // N>2 channels: take the first two as L/R and ignore the rest.
         const UInt32 stride = c->device_channels;
@@ -433,7 +434,7 @@ static OSStatus input_cb(void *ud,
 
     float pl, rl, pr, rr;
     int clips = 0;
-    block_stats_s16_stereo(dst, (size_t)nframes, &pl, &rl, &pr, &rr, &clips);
+    block_stats_stereo(dst, (size_t)nframes, &pl, &rl, &pr, &rr, &clips);
     atomic_store(&c->args->st->peak_left,    (int)pl);
     atomic_store(&c->args->st->peak_right,   (int)pr);
     atomic_store(&c->args->st->rms_left_q15, (int)rl);
@@ -497,6 +498,9 @@ void *audio_thread_main(void *arg) {
 
     // Client format matches the device's channel count; we mix to stereo
     // ourselves in the callback before pushing into the (stereo) ring.
+    // Samples come as full-scale signed 32-bit, which is the internal
+    // left-justified format (sample.h): the AU converts from whatever the
+    // device delivers, and the recorder keeps 16 or 24 bits per -b.
     AudioStreamBasicDescription fmt = {
         .mSampleRate       = (Float64)a->rate,
         .mFormatID         = kAudioFormatLinearPCM,
@@ -504,9 +508,9 @@ void *audio_thread_main(void *arg) {
                            | kLinearPCMFormatFlagIsPacked,
         .mFramesPerPacket  = 1,
         .mChannelsPerFrame = dev_ch,
-        .mBitsPerChannel   = 16,
-        .mBytesPerFrame    = dev_ch * sizeof(int16_t),
-        .mBytesPerPacket   = dev_ch * sizeof(int16_t),
+        .mBitsPerChannel   = 32,
+        .mBytesPerFrame    = dev_ch * sizeof(sample_t),
+        .mBytesPerPacket   = dev_ch * sizeof(sample_t),
     };
     CHECK(AudioUnitSetProperty(ctx.au, kAudioUnitProperty_StreamFormat,
                                kAudioUnitScope_Output, CA_INPUT_BUS,
@@ -521,8 +525,8 @@ void *audio_thread_main(void *arg) {
     if (max_frames < 4096) max_frames = 4096;
     ctx.max_frames = max_frames;
 
-    ctx.au_scratch = calloc((size_t)max_frames * dev_ch,    sizeof(int16_t));
-    ctx.ring_block = calloc((size_t)max_frames * CHANNELS,  sizeof(int16_t));
+    ctx.au_scratch = calloc((size_t)max_frames * dev_ch,    sizeof(sample_t));
+    ctx.ring_block = calloc((size_t)max_frames * CHANNELS,  sizeof(sample_t));
     ctx.abl        = calloc(1, sizeof(AudioBufferList));
     if (!ctx.au_scratch || !ctx.ring_block || !ctx.abl) {
         fprintf(stderr, "CoreAudio: OOM allocating capture buffers\n");
@@ -531,7 +535,7 @@ void *audio_thread_main(void *arg) {
     ctx.abl->mNumberBuffers = 1;
     ctx.abl->mBuffers[0].mNumberChannels = dev_ch;
     ctx.abl->mBuffers[0].mDataByteSize =
-        (UInt32)(max_frames * dev_ch * sizeof(int16_t));
+        (UInt32)(max_frames * dev_ch * sizeof(sample_t));
     ctx.abl->mBuffers[0].mData = ctx.au_scratch;
 
     AURenderCallbackStruct cb = { .inputProc = input_cb, .inputProcRefCon = &ctx };
@@ -571,6 +575,8 @@ void *audio_thread_main(void *arg) {
     fprintf(stderr,
             "CoreAudio: capture started @ %u Hz, max_frames=%u, device_channels=%u\n",
             a->rate, (unsigned)max_frames, (unsigned)dev_ch);
+    // capture_bits first: the recorder reads it once it sees negotiated_rate.
+    atomic_store(&a->st->capture_bits, 32u);
     atomic_store(&a->st->negotiated_rate, (unsigned)a->rate);
 
     // Block until shutdown — capture happens on the CoreAudio RT thread.

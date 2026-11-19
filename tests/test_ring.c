@@ -1,5 +1,6 @@
 #include "test_util.h"
 #include "../src/ring.h"
+#include "../src/sample.h"
 #include <string.h>
 
 TEST(init_rounds_up_to_pow2) {
@@ -13,8 +14,8 @@ TEST(init_rounds_up_to_pow2) {
 TEST(write_then_read_returns_same_data) {
     ring_t r;
     ring_init(&r, 16);
-    int16_t in[6]  = { 1, -2, 3, -4, 5, -6 };
-    int16_t out[6] = { 0 };
+    sample_t in[6]  = { 1, -2, 3, -4, 5, -6 };
+    sample_t out[6] = { 0 };
     ASSERT_EQ_LL(ring_write(&r, in, 6), 6);
     ASSERT_EQ_LL(ring_avail_read(&r), 6);
     ASSERT_EQ_LL(ring_read(&r, out, 6), 6);
@@ -26,10 +27,10 @@ TEST(write_then_read_returns_same_data) {
 TEST(write_clipped_when_full) {
     ring_t r;
     ring_init(&r, 4);  // cap = 4
-    int16_t in[6] = { 10, 20, 30, 40, 50, 60 };
+    sample_t in[6] = { 10, 20, 30, 40, 50, 60 };
     ASSERT_EQ_LL(ring_write(&r, in, 6), 4);
     ASSERT_EQ_LL(ring_avail_write(&r), 0);
-    int16_t out[4] = { 0 };
+    sample_t out[4] = { 0 };
     ASSERT_EQ_LL(ring_read(&r, out, 4), 4);
     ASSERT_EQ_LL(out[0], 10);
     ASSERT_EQ_LL(out[3], 40);
@@ -39,7 +40,7 @@ TEST(write_clipped_when_full) {
 TEST(read_clipped_when_empty) {
     ring_t r;
     ring_init(&r, 8);
-    int16_t out[4];
+    sample_t out[4];
     ASSERT_EQ_LL(ring_read(&r, out, 4), 0);
     ring_free(&r);
 }
@@ -47,16 +48,27 @@ TEST(read_clipped_when_empty) {
 TEST(wraps_around_correctly) {
     ring_t r;
     ring_init(&r, 8);  // cap = 8
-    int16_t a[6] = { 1, 2, 3, 4, 5, 6 };
+    sample_t a[6] = { 1, 2, 3, 4, 5, 6 };
     ring_write(&r, a, 6);
-    int16_t tmp[4];
+    sample_t tmp[4];
     ring_read(&r, tmp, 4);                 // head=6, tail=4
-    int16_t b[5] = { 7, 8, 9, 10, 11 };
+    sample_t b[5] = { 7, 8, 9, 10, 11 };
     ASSERT_EQ_LL(ring_write(&r, b, 5), 5); // wraps: writes 2 then 3
-    int16_t out[7];
+    sample_t out[7];
     ASSERT_EQ_LL(ring_read(&r, out, 7), 7);
-    int16_t expected[7] = { 5, 6, 7, 8, 9, 10, 11 };
+    sample_t expected[7] = { 5, 6, 7, 8, 9, 10, 11 };
     for (int i = 0; i < 7; i++) ASSERT_EQ_LL(out[i], expected[i]);
+    ring_free(&r);
+}
+
+TEST(preserves_full_32bit_samples) {
+    ring_t r;
+    ring_init(&r, 8);
+    sample_t in[4]  = { 0x7FFFFF00, INT32_MIN, 256, -256 };
+    sample_t out[4] = { 0 };
+    ASSERT_EQ_LL(ring_write(&r, in, 4), 4);
+    ASSERT_EQ_LL(ring_read(&r, out, 4), 4);
+    for (int i = 0; i < 4; i++) ASSERT_EQ_LL(out[i], in[i]);
     ring_free(&r);
 }
 
@@ -66,4 +78,5 @@ void run_ring_tests(void) {
     RUN(write_clipped_when_full);
     RUN(read_clipped_when_empty);
     RUN(wraps_around_correctly);
+    RUN(preserves_full_32bit_samples);
 }

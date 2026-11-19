@@ -1,5 +1,6 @@
 #include "audio.h"
 #include "level.h"
+#include "sample.h"
 #include <alsa/asoundlib.h>
 #include <pthread.h>
 #include <sched.h>
@@ -47,7 +48,28 @@ void audio_list_devices(void) {
     snd_device_name_free_hint(hints);
 }
 
-static int configure_pcm(snd_pcm_t *pcm, unsigned int *rate,
+// Capture formats in order of preference for the requested depth. 24-bit
+// prefers the 32-bit container (what most I2S ADCs such as the HiFiBerry
+// DAC+ADC Pro expose), then S24_LE; both fall back to 16-bit (e.g. USB
+// codecs that only do S16_LE). The recorder writes 16-bit WAVs when the
+// device can't deliver more.
+static const snd_pcm_format_t formats_24[] = {
+    SND_PCM_FORMAT_S32_LE, SND_PCM_FORMAT_S24_LE, SND_PCM_FORMAT_S16_LE,
+};
+static const snd_pcm_format_t formats_16[] = {
+    SND_PCM_FORMAT_S16_LE, SND_PCM_FORMAT_S32_LE, SND_PCM_FORMAT_S24_LE,
+};
+
+static unsigned format_bits(snd_pcm_format_t f) {
+    switch (f) {
+        case SND_PCM_FORMAT_S32_LE: return 32;
+        case SND_PCM_FORMAT_S24_LE: return 24;
+        default:                    return 16;
+    }
+}
+
+static int configure_pcm(snd_pcm_t *pcm, unsigned int *rate, int want_bits,
+                         snd_pcm_format_t *format_out,
                          snd_pcm_uframes_t *period_frames,
                          unsigned int *periods_out) {
     snd_pcm_hw_params_t *hw;
@@ -56,7 +78,14 @@ static int configure_pcm(snd_pcm_t *pcm, unsigned int *rate,
 
     if ((rc = snd_pcm_hw_params_any(pcm, hw)) < 0) return rc;
     if ((rc = snd_pcm_hw_params_set_access(pcm, hw, SND_PCM_ACCESS_RW_INTERLEAVED)) < 0) return rc;
-    if ((rc = snd_pcm_hw_params_set_format(pcm, hw, SND_PCM_FORMAT_S16_LE)) < 0) return rc;
+    const snd_pcm_format_t *prefs = (want_bits == 24) ? formats_24 : formats_16;
+    snd_pcm_format_t fmt = SND_PCM_FORMAT_UNKNOWN;
+    for (size_t i = 0; i < 3; i++) {
+        if (snd_pcm_hw_params_test_format(pcm, hw, prefs[i]) == 0) { fmt = prefs[i]; break; }
+    }
+    if (fmt == SND_PCM_FORMAT_UNKNOWN) return -EINVAL;
+    if ((rc = snd_pcm_hw_params_set_format(pcm, hw, fmt)) < 0) return rc;
+    *format_out = fmt;
     if ((rc = snd_pcm_hw_params_set_channels(pcm, hw, CHANNELS)) < 0) return rc;
 
     unsigned int rr = *rate;
@@ -112,20 +141,30 @@ void *audio_thread_main(void *arg) {
 
     unsigned int rate = a->rate, periods = 0;
     snd_pcm_uframes_t period_frames = 0;
-    rc = configure_pcm(pcm, &rate, &period_frames, &periods);
+    snd_pcm_format_t fmt = SND_PCM_FORMAT_UNKNOWN;
+    rc = configure_pcm(pcm, &rate, a->bits, &fmt, &period_frames, &periods);
     if (rc < 0) {
         fprintf(stderr, "configure_pcm: %s\n", snd_strerror(rc));
         snd_pcm_close(pcm);
         atomic_store(&a->st->quit, 1);
         return NULL;
     }
-    fprintf(stderr, "ALSA: %s @ %u Hz, period=%lu frames, periods=%u (%.0f ms buffer)\n",
-            a->device, rate, (unsigned long)period_frames, periods,
+    fprintf(stderr, "ALSA: %s @ %u Hz, %s, period=%lu frames, periods=%u (%.0f ms buffer)\n",
+            a->device, rate, snd_pcm_format_name(fmt),
+            (unsigned long)period_frames, periods,
             1000.0 * (double)period_frames * periods / rate);
+    // capture_bits first: the recorder reads it once it sees negotiated_rate.
+    atomic_store(&a->st->capture_bits, format_bits(fmt));
     atomic_store(&a->st->negotiated_rate, rate);
 
-    int16_t *block = (int16_t *)calloc(period_frames * CHANNELS, sizeof(int16_t));
-    if (!block) {
+    // raw: what the device delivers (2 or 4 bytes/sample). block: converted
+    // to the internal left-justified format for the meters and the ring.
+    size_t nsamp = (size_t)period_frames * CHANNELS;
+    void     *raw   = calloc(nsamp, 4);
+    sample_t *block = (sample_t *)calloc(nsamp, sizeof(sample_t));
+    if (!raw || !block) {
+        free(raw);
+        free(block);
         snd_pcm_close(pcm);
         atomic_store(&a->st->quit, 1);
         return NULL;
@@ -134,7 +173,7 @@ void *audio_thread_main(void *arg) {
     snd_pcm_prepare(pcm);
 
     while (!atomic_load(&a->st->quit)) {
-        snd_pcm_sframes_t got = snd_pcm_readi(pcm, block, period_frames);
+        snd_pcm_sframes_t got = snd_pcm_readi(pcm, raw, period_frames);
         if (got == -EPIPE) {
             int n = atomic_fetch_add(&a->st->xrun_count, 1) + 1;
             fprintf(stderr, "xrun #%d: ALSA capture overrun (capture thread starved)\n", n);
@@ -151,10 +190,17 @@ void *audio_thread_main(void *arg) {
             continue;
         }
 
+        size_t got_samples = (size_t)got * CHANNELS;
+        switch (fmt) {
+            case SND_PCM_FORMAT_S32_LE: memcpy(block, raw, got_samples * sizeof(sample_t)); break;
+            case SND_PCM_FORMAT_S24_LE: samples_s24_to_s32((const int32_t *)raw, block, got_samples); break;
+            default:                    samples_s16_to_s32((const int16_t *)raw, block, got_samples); break;
+        }
+
         // Publish per-block stats for the meter.
         float pl, rl, pr, rr;
         int clips = 0;
-        block_stats_s16_stereo(block, (size_t)got, &pl, &rl, &pr, &rr, &clips);
+        block_stats_stereo(block, (size_t)got, &pl, &rl, &pr, &rr, &clips);
         atomic_store(&a->st->peak_left,    (int)pl);
         atomic_store(&a->st->peak_right,   (int)pr);
         atomic_store(&a->st->rms_left_q15, (int)rl);
@@ -165,7 +211,7 @@ void *audio_thread_main(void *arg) {
         // Push to ring. If full, oldest data was meant to be drained by
         // the recorder; on the rare "ring full" we drop the new block and
         // count it as an xrun so the user sees it.
-        size_t want = (size_t)got * CHANNELS;
+        size_t want = got_samples;
         size_t wrote = ring_write(a->ring, block, want);
         if (wrote < want) {
             int n = atomic_fetch_add(&a->st->xrun_count, 1) + 1;
@@ -174,6 +220,7 @@ void *audio_thread_main(void *arg) {
         }
     }
 
+    free(raw);
     free(block);
     snd_pcm_close(pcm);
     return NULL;

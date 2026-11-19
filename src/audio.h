@@ -5,6 +5,7 @@
 typedef struct {
     const char  *device;
     unsigned int rate;
+    int          bits;   // requested depth (16 or 24); backend picks the device format
     ring_t      *ring;
     app_state_t *st;
 } audio_args_t;

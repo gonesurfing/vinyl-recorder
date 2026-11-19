@@ -26,6 +26,8 @@ void app_state_init(app_state_t *s) {
     atomic_init(&s->encoder_active, 0);
     atomic_init(&s->frames_recorded, 0);
     atomic_init(&s->negotiated_rate, 0);
+    atomic_init(&s->capture_bits, 0);
+    atomic_init(&s->output_bits, 0);
     atomic_init(&s->peak_left, 0);
     atomic_init(&s->peak_right, 0);
     atomic_init(&s->rms_left_q15, 0);
@@ -54,6 +56,8 @@ static void usage(void) {
         "usage: %s [options]\n"
         "  -d, --device <name>   capture device (default: \"default\")\n"
         "  -r, --rate <hz>       sample rate (default: %d)\n"
+        "  -b, --bits <16|24>    WAV bit depth (default: 16); 24 needs a device\n"
+        "                        that captures 24-bit, else 16-bit is written\n"
         "  -o, --output <dir>    output directory (default: $HOME/recordings)\n"
         "  -L, --list-devices    list available capture devices and exit\n"
         "  -P, --probe           capture for 3s without UI; print levels (diagnostic)\n"
@@ -99,6 +103,7 @@ int main(int argc, char **argv) {
     app_config_t cfg = {
         .device     = DEFAULT_DEVICE,
         .rate       = DEFAULT_RATE,
+        .bits       = 16,
         .output_dir = default_output_dir(),
     };
 
@@ -106,6 +111,7 @@ int main(int argc, char **argv) {
     static const struct option longopts[] = {
         { "device",       required_argument, 0, 'd' },
         { "rate",         required_argument, 0, 'r' },
+        { "bits",         required_argument, 0, 'b' },
         { "output",       required_argument, 0, 'o' },
         { "list-devices", no_argument,       0, 'L' },
         { "probe",        no_argument,       0, 'P' },
@@ -115,10 +121,17 @@ int main(int argc, char **argv) {
     };
 
     int c;
-    while ((c = getopt_long(argc, argv, "d:r:o:LPvh", longopts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "d:r:b:o:LPvh", longopts, NULL)) != -1) {
         switch (c) {
             case 'd': cfg.device = optarg; break;
             case 'r': cfg.rate = (unsigned int)atoi(optarg); break;
+            case 'b':
+                cfg.bits = atoi(optarg);
+                if (cfg.bits != 16 && cfg.bits != 24) {
+                    fprintf(stderr, "error: --bits must be 16 or 24\n");
+                    return 2;
+                }
+                break;
             case 'o': cfg.output_dir = optarg; break;
             case 'L': audio_list_devices(); return 0;
             case 'P': probe = 1; break;
@@ -147,7 +160,8 @@ int main(int argc, char **argv) {
     }
 
     audio_args_t aargs = {
-        .device = cfg.device, .rate = cfg.rate, .ring = &ring, .st = &g_state,
+        .device = cfg.device, .rate = cfg.rate, .bits = cfg.bits,
+        .ring = &ring, .st = &g_state,
     };
 
     if (probe) {
@@ -167,6 +181,7 @@ int main(int argc, char **argv) {
 
     recorder_args_t rargs = {
         .ring = &ring, .st = &g_state, .output_dir = cfg.output_dir, .rate = (int)cfg.rate,
+        .bits = cfg.bits,
     };
 
     // Redirect stderr to a log file so audio/recorder messages (xruns,

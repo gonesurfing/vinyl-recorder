@@ -1,7 +1,16 @@
 #include "test_util.h"
 #include "../src/level.h"
 #include "../src/common.h"
+#include "../src/sample.h"
 #include <math.h>
+
+// Feed 16-bit test vectors through the same conversion the capture path uses.
+static void stats16(const int16_t *s16, size_t frames,
+                    float *pl, float *rl, float *pr, float *rr, int *clips) {
+    sample_t buf[256];
+    samples_s16_to_s32(s16, buf, frames * 2);
+    block_stats_stereo(buf, frames, pl, rl, pr, rr, clips);
+}
 
 TEST(dbfs_full_scale_is_zero) {
     ASSERT_NEAR(dbfs_from_linear(SAMPLE_FULL_SCALE), 0.0f, 0.01f);
@@ -20,7 +29,7 @@ TEST(block_stats_constant_signal) {
                      10000, -20000,  10000, -20000 };
     float pl, rl, pr, rr;
     int clips;
-    block_stats_s16_stereo(s, 4, &pl, &rl, &pr, &rr, &clips);
+    stats16(s, 4, &pl, &rl, &pr, &rr, &clips);
     ASSERT_NEAR(pl, 10000.0f, 1.0f);
     ASSERT_NEAR(pr, 20000.0f, 1.0f);
     ASSERT_NEAR(rl, 10000.0f, 1.0f);
@@ -32,7 +41,7 @@ TEST(block_stats_silence) {
     int16_t s[8] = { 0 };
     float pl, rl, pr, rr;
     int clips;
-    block_stats_s16_stereo(s, 4, &pl, &rl, &pr, &rr, &clips);
+    stats16(s, 4, &pl, &rl, &pr, &rr, &clips);
     ASSERT_NEAR(pl, 0.0f, 0.001f);
     ASSERT_NEAR(rl, 0.0f, 0.001f);
     ASSERT_EQ_LL(clips, 0);
@@ -43,7 +52,7 @@ TEST(block_stats_handles_int16_min) {
     int16_t s[2] = { -32768, -32768 };
     float pl, rl, pr, rr;
     int clips;
-    block_stats_s16_stereo(s, 1, &pl, &rl, &pr, &rr, &clips);
+    stats16(s, 1, &pl, &rl, &pr, &rr, &clips);
     ASSERT_NEAR(pl, 32768.0f, 1.0f);
     ASSERT_NEAR(pr, 32768.0f, 1.0f);
     // Single saturated sample is below the run threshold (3) so no event.
@@ -56,7 +65,7 @@ TEST(clip_below_threshold_no_event) {
     for (int i = 0; i < 20; i++) s[i] = 32766;
     float pl, rl, pr, rr;
     int clips;
-    block_stats_s16_stereo(s, 10, &pl, &rl, &pr, &rr, &clips);
+    stats16(s, 10, &pl, &rl, &pr, &rr, &clips);
     ASSERT_EQ_LL(clips, 0);
 }
 
@@ -70,7 +79,7 @@ TEST(clip_two_consecutive_no_event) {
     };
     float pl, rl, pr, rr;
     int clips;
-    block_stats_s16_stereo(s, 4, &pl, &rl, &pr, &rr, &clips);
+    stats16(s, 4, &pl, &rl, &pr, &rr, &clips);
     ASSERT_EQ_LL(clips, 0);
 }
 
@@ -83,7 +92,7 @@ TEST(clip_three_consecutive_one_event) {
     };
     float pl, rl, pr, rr;
     int clips;
-    block_stats_s16_stereo(s, 4, &pl, &rl, &pr, &rr, &clips);
+    stats16(s, 4, &pl, &rl, &pr, &rr, &clips);
     ASSERT_EQ_LL(clips, 1);
 }
 
@@ -93,7 +102,7 @@ TEST(clip_long_run_still_one_event) {
     for (int i = 0; i < 50; i++) s[i * 2 + 1] = -32768;
     float pl, rl, pr, rr;
     int clips;
-    block_stats_s16_stereo(s, 50, &pl, &rl, &pr, &rr, &clips);
+    stats16(s, 50, &pl, &rl, &pr, &rr, &clips);
     ASSERT_EQ_LL(clips, 1);
 }
 
@@ -111,7 +120,7 @@ TEST(clip_two_separate_runs_two_events) {
     };
     float pl, rl, pr, rr;
     int clips;
-    block_stats_s16_stereo(s, 8, &pl, &rl, &pr, &rr, &clips);
+    stats16(s, 8, &pl, &rl, &pr, &rr, &clips);
     ASSERT_EQ_LL(clips, 2);
 }
 
@@ -126,8 +135,45 @@ TEST(clip_both_channels_simultaneous_two_events) {
     };
     float pl, rl, pr, rr;
     int clips;
-    block_stats_s16_stereo(s, 4, &pl, &rl, &pr, &rr, &clips);
+    stats16(s, 4, &pl, &rl, &pr, &rr, &clips);
     ASSERT_EQ_LL(clips, 2);
+}
+
+TEST(block_stats_24bit_resolution) {
+    // One 24-bit LSB (256 in left-justified int32) is 1/256 of a 16-bit LSB.
+    sample_t s[2] = { 256, -256 };
+    float pl, rl, pr, rr;
+    int clips;
+    block_stats_stereo(s, 1, &pl, &rl, &pr, &rr, &clips);
+    ASSERT_NEAR(pl, 1.0f / 256.0f, 1e-6);
+    ASSERT_NEAR(pr, 1.0f / 256.0f, 1e-6);
+}
+
+TEST(block_stats_handles_int32_min) {
+    sample_t s[2] = { INT32_MIN, INT32_MIN };
+    float pl, rl, pr, rr;
+    int clips;
+    block_stats_stereo(s, 1, &pl, &rl, &pr, &rr, &clips);
+    ASSERT_NEAR(pl, 32768.0f, 0.01f);
+    ASSERT_NEAR(rr, 32768.0f, 0.01f);
+}
+
+TEST(clip_24bit_full_scale_is_saturated) {
+    // 24-bit positive full scale (0x7FFFFF) left-justified.
+    sample_t s[6] = { 0x7FFFFF00, 0, 0x7FFFFF00, 0, 0x7FFFFF00, 0 };
+    float pl, rl, pr, rr;
+    int clips;
+    block_stats_stereo(s, 3, &pl, &rl, &pr, &rr, &clips);
+    ASSERT_EQ_LL(clips, 1);
+}
+
+TEST(clip_24bit_just_below_16bit_full_scale_not_saturated) {
+    // Just under 16-bit 32767 even with 24-bit detail: not a clip.
+    sample_t s[6] = { 0x7FFEFF00, 0, 0x7FFEFF00, 0, 0x7FFEFF00, 0 };
+    float pl, rl, pr, rr;
+    int clips;
+    block_stats_stereo(s, 3, &pl, &rl, &pr, &rr, &clips);
+    ASSERT_EQ_LL(clips, 0);
 }
 
 TEST(ppm_attack_then_release) {
@@ -169,6 +215,10 @@ void run_level_tests(void) {
     RUN(clip_long_run_still_one_event);
     RUN(clip_two_separate_runs_two_events);
     RUN(clip_both_channels_simultaneous_two_events);
+    RUN(block_stats_24bit_resolution);
+    RUN(block_stats_handles_int32_min);
+    RUN(clip_24bit_full_scale_is_saturated);
+    RUN(clip_24bit_just_below_16bit_full_scale_not_saturated);
     RUN(ppm_attack_then_release);
     RUN(ppm_hold_captures_peak);
 }

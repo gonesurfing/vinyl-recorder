@@ -17,7 +17,7 @@ extern char **environ;
 // --- Lookback buffer -----------------------------------------------------
 
 int lookback_init(lookback_t *lb, size_t cap_samples) {
-    lb->buf = (int16_t *)calloc(cap_samples, sizeof(int16_t));
+    lb->buf = (sample_t *)calloc(cap_samples, sizeof(sample_t));
     if (!lb->buf) return -1;
     lb->cap_samples = cap_samples;
     lb->write = 0;
@@ -32,7 +32,7 @@ void lookback_free(lookback_t *lb) {
     lb->write = lb->filled = 0;
 }
 
-void lookback_push(lookback_t *lb, const int16_t *src, size_t n) {
+void lookback_push(lookback_t *lb, const sample_t *src, size_t n) {
     if (lb->cap_samples == 0) return;
     for (size_t i = 0; i < n; i++) {
         lb->buf[lb->write % lb->cap_samples] = src[i];
@@ -46,15 +46,15 @@ size_t lookback_size(const lookback_t *lb) {
     return lb->filled;
 }
 
-void lookback_dump(const lookback_t *lb, int16_t *dst) {
+void lookback_dump(const lookback_t *lb, sample_t *dst) {
     size_t n = lb->filled;
     if (n == 0) return;
     // Oldest sample sits at (write - n) modulo cap.
     size_t start = (lb->write - n) % lb->cap_samples;
     size_t first = lb->cap_samples - start;
     if (first > n) first = n;
-    memcpy(dst, &lb->buf[start], first * sizeof(int16_t));
-    if (n > first) memcpy(dst + first, &lb->buf[0], (n - first) * sizeof(int16_t));
+    memcpy(dst, &lb->buf[start], first * sizeof(sample_t));
+    if (n > first) memcpy(dst + first, &lb->buf[0], (n - first) * sizeof(sample_t));
 }
 
 // --- WAV writer ----------------------------------------------------------
@@ -64,12 +64,13 @@ struct wav_writer {
     SF_INFO  info;
 };
 
-wav_writer_t *wav_open(const char *path, int rate, int channels) {
+wav_writer_t *wav_open(const char *path, int rate, int channels, int bits) {
     wav_writer_t *w = calloc(1, sizeof(*w));
     if (!w) return NULL;
     w->info.samplerate = rate;
     w->info.channels   = channels;
-    w->info.format     = SF_FORMAT_WAV | SF_FORMAT_PCM_16;
+    w->info.format     = SF_FORMAT_WAV |
+                         (bits == 24 ? SF_FORMAT_PCM_24 : SF_FORMAT_PCM_16);
     w->sf = sf_open(path, SFM_WRITE, &w->info);
     if (!w->sf) {
         fprintf(stderr, "sf_open(%s): %s\n", path, sf_strerror(NULL));
@@ -79,8 +80,10 @@ wav_writer_t *wav_open(const char *path, int rate, int channels) {
     return w;
 }
 
-size_t wav_write(wav_writer_t *w, const int16_t *src, size_t frames) {
-    sf_count_t n = sf_writef_short(w->sf, src, (sf_count_t)frames);
+size_t wav_write(wav_writer_t *w, const sample_t *src, size_t frames) {
+    // sf_writef_int treats int as full-scale 32-bit and keeps the top bits
+    // for the file's depth, which is exactly our left-justified format.
+    sf_count_t n = sf_writef_int(w->sf, src, (sf_count_t)frames);
     return (size_t)(n < 0 ? 0 : n);
 }
 
@@ -93,17 +96,22 @@ int wav_close(wav_writer_t *w) {
 
 // --- Test helper (not declared in recorder.h; tests link via extern) -----
 
-int sndfile_read_int16_for_test(const char *path, int16_t *out,
-                                int max_samples, int *rate, int *ch) {
+int sndfile_read_for_test(const char *path, int32_t *out, int max_samples,
+                          int *rate, int *ch, int *bits) {
     SF_INFO info; memset(&info, 0, sizeof(info));
     SNDFILE *sf = sf_open(path, SFM_READ, &info);
     if (!sf) return -1;
     *rate = info.samplerate;
     *ch   = info.channels;
+    switch (info.format & SF_FORMAT_SUBMASK) {
+        case SF_FORMAT_PCM_16: *bits = 16; break;
+        case SF_FORMAT_PCM_24: *bits = 24; break;
+        default:               *bits = 0;  break;
+    }
     sf_count_t total_frames = info.frames;
     sf_count_t want_frames = max_samples / info.channels;
     if (want_frames > total_frames) want_frames = total_frames;
-    sf_count_t got = sf_readf_short(sf, out, want_frames);
+    sf_count_t got = sf_readf_int(sf, out, want_frames);
     sf_close(sf);
     return (int)(got * info.channels);
 }
@@ -170,6 +178,10 @@ int flac_poll(pid_t *pid) {
 
 // --- Recorder thread -----------------------------------------------------
 
+int recorder_output_bits(int requested_bits, int capture_bits) {
+    return (requested_bits == 24 && capture_bits >= 24) ? 24 : 16;
+}
+
 static void make_filename(char *out, size_t n, const char *dir) {
     time_t t = time(NULL);
     struct tm tm;
@@ -211,6 +223,15 @@ void *recorder_thread_main(void *arg) {
     }
     if (rate == 0) return NULL;  // audio thread bailed before opening device
 
+    // The audio thread publishes capture_bits before negotiated_rate.
+    int capture_bits = (int)atomic_load(&st->capture_bits);
+    int bits = recorder_output_bits(a->bits, capture_bits);
+    if (a->bits == 24 && bits != 24)
+        fprintf(stderr, "recorder: 24-bit requested but device captures %d-bit; "
+                        "writing 16-bit WAVs\n", capture_bits);
+    fprintf(stderr, "recorder: writing %d-bit WAVs at %u Hz\n", bits, rate);
+    atomic_store(&st->output_bits, bits);
+
     lookback_t lb;
     size_t lb_samples = (size_t)(PREROLL_SECONDS * rate) * CHANNELS;
     if (lookback_init(&lb, lb_samples) != 0) {
@@ -218,7 +239,7 @@ void *recorder_thread_main(void *arg) {
         return NULL;
     }
 
-    int16_t *scratch = malloc(SCRATCH_FRAMES * CHANNELS * sizeof(int16_t));
+    sample_t *scratch = malloc(SCRATCH_FRAMES * CHANNELS * sizeof(sample_t));
     if (!scratch) { lookback_free(&lb); atomic_store(&st->quit, 1); return NULL; }
 
     wav_writer_t *wav = NULL;
@@ -239,11 +260,11 @@ void *recorder_thread_main(void *arg) {
         if (req == 1 && state == REC_IDLE) {
             // start
             make_filename(wav_path, sizeof(wav_path), a->output_dir);
-            wav = wav_open(wav_path, (int)rate, CHANNELS);
+            wav = wav_open(wav_path, (int)rate, CHANNELS, bits);
             if (wav) {
                 size_t n = lookback_size(&lb);
                 if (n > 0) {
-                    int16_t *dump = malloc(n * sizeof(int16_t));
+                    sample_t *dump = malloc(n * sizeof(sample_t));
                     if (dump) {
                         lookback_dump(&lb, dump);
                         wav_write(wav, dump, n / CHANNELS);
@@ -264,7 +285,7 @@ void *recorder_thread_main(void *arg) {
             if (flac_spawn(wav_path, &encoder_pid) == 0)
                 atomic_store(&st->encoder_active, 1);
             make_filename(wav_path, sizeof(wav_path), a->output_dir);
-            wav = wav_open(wav_path, (int)rate, CHANNELS);
+            wav = wav_open(wav_path, (int)rate, CHANNELS, bits);
             atomic_store(&st->frames_recorded, 0);
         }
 

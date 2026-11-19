@@ -1,7 +1,7 @@
 # vinyl_recorder
 
 A terminal audio recorder built for digitizing vinyl, but useful for any
-line-level capture. Records 16-bit stereo PCM from an ALSA (Linux) or
+line-level capture. Records 16- or 24-bit stereo PCM from an ALSA (Linux) or
 CoreAudio (macOS) input device, shows live stereo level meters in an
 ncurses UI, and encodes finished takes to FLAC in the background.
 
@@ -34,6 +34,7 @@ ncurses UI, and encodes finished takes to FLAC in the background.
 ```
 -d, --device <name>   capture device (default: "default")
 -r, --rate <hz>       sample rate (default: 44100)
+-b, --bits <16|24>    WAV bit depth (default: 16)
 -o, --output <dir>    output directory (default: $HOME/recordings)
 -L, --list-devices    list available capture devices and exit
 -P, --probe           capture for 3s without UI; print levels (diagnostic)
@@ -83,6 +84,33 @@ make test
 
 The test suite only depends on `libsndfile` (for a WAV round-trip
 check), so it builds on any host even without ALSA installed.
+
+## 24-bit recording
+
+`-b 24` records 24-bit WAVs (and FLACs). It needs an interface that
+captures at 24 bits, such as the HiFiBerry DAC+ADC Pro; a 16-bit-only
+device (most USB phono preamps, e.g. the Burr-Brown PCM29xx codecs) is
+recorded as 16-bit anyway, since padding it would only waste space. The
+UI shows the depth actually being written, and the log says why if it
+fell back:
+
+```sh
+./vinyl_recorder -d hw:CARD=sndrpihifiberry -b 24 -r 96000
+```
+
+On macOS the requested depth is used as-is.
+
+24-bit mostly buys headroom: you can set levels conservatively (peaks
+around -12 dB) without losing resolution.
+
+## Raspberry Pi model and USB audio
+
+Full-speed (USB 1.1) audio interfaces lose packets on the Raspberry Pi 2
+and 3 family's USB controller. Each loss silently removes ~1 ms of audio:
+no xrun is counted, and the kernel log rarely reports it. Measured with a
+1 kHz test tone on a PCM2902-based USB codec: Pi 3B+ ~2-12 losses per
+second, Pi 2 ~0.7 per second, Pi 4 none. Use a Pi 4 or newer, or an I2S
+interface such as a HiFiBerry ADC board, which doesn't go through USB.
 
 ## Real-time priority (Linux / Raspberry Pi)
 
@@ -135,6 +163,7 @@ src/
   audio_alsa.c       ALSA capture backend (Linux)
   audio_coreaudio.c  CoreAudio / AUHAL capture backend (macOS)
   ring.{c,h}         lock-free SPSC ring buffer (capture → recorder)
+  sample.{c,h}       internal sample format (left-justified int32) + converters
   level.{c,h}        peak / RMS / dBFS conversion for the meters
   recorder.{c,h}     lookback buffer, WAV writer, FLAC spawn/poll
   ui.{c,h}           ncurses render loop + key handling
@@ -143,7 +172,7 @@ tests/               unit tests for ring, level, recorder
 ```
 
 Three threads, no locks on the audio path: the capture backend writes
-int16 frames into the ring, the recorder thread drains them into a WAV
+left-justified int32 frames into the ring, the recorder thread drains them into a WAV
 and then hands the closed file to a `flac` subprocess, and the UI
 thread reads atomic state to render at 30 Hz.
 

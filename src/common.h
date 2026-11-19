@@ -32,6 +32,7 @@ typedef enum {
 typedef struct {
     const char *device;
     unsigned int rate;
+    int bits;                 // requested capture/output depth: 16 or 24
     const char *output_dir;
 } app_config_t;
 
@@ -44,6 +45,8 @@ typedef struct {
     _Atomic int      encoder_active;  // 0/1, recorder publishes
     _Atomic uint64_t frames_recorded; // recorder publishes; resets on each new file
     _Atomic unsigned negotiated_rate; // audio thread publishes once device is open; 0 until then
+    _Atomic unsigned capture_bits;    // audio thread: device sample depth (16/24/32), stored before negotiated_rate
+    _Atomic int      output_bits;     // recorder publishes the WAV depth it writes (16/24); 0 until known
 
     // Latest block stats from the capture thread, per channel.
     // Stored as raw int32 (peak abs sample) and float (RMS).

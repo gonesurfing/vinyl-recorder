@@ -10,11 +10,11 @@ float dbfs_from_linear(float linear) {
     return v;
 }
 
-void block_stats_s16_stereo(const int16_t *samples, size_t frames,
-                            float *peak_l, float *rms_l,
-                            float *peak_r, float *rms_r,
-                            int *clip_events) {
-    int32_t pl = 0, pr = 0;
+void block_stats_stereo(const sample_t *samples, size_t frames,
+                        float *peak_l, float *rms_l,
+                        float *peak_r, float *rms_r,
+                        int *clip_events) {
+    int64_t pl = 0, pr = 0;
     double sl = 0.0, sr = 0.0;
     // Per-channel running count of consecutive saturated samples and a flag
     // tracking whether the current run has already been counted as an event.
@@ -22,31 +22,33 @@ void block_stats_s16_stereo(const int16_t *samples, size_t frames,
     int counted_l = 0, counted_r = 0;
     int events = 0;
     for (size_t i = 0; i < frames; i++) {
-        int32_t a = samples[i * 2 + 0];
-        int32_t b = samples[i * 2 + 1];
-        int32_t aa = a < 0 ? -a : a;     // safe: int32 holds 32768
-        int32_t bb = b < 0 ? -b : b;
+        int64_t a = samples[i * 2 + 0];
+        int64_t b = samples[i * 2 + 1];
+        int64_t aa = a < 0 ? -a : a;     // safe: int64 holds -INT32_MIN
+        int64_t bb = b < 0 ? -b : b;
         if (aa > pl) pl = aa;
         if (bb > pr) pr = bb;
         sl += (double)a * (double)a;
         sr += (double)b * (double)b;
 
-        if (aa >= 32767) {
+        if (aa >= CLIP_THRESHOLD) {
             if (++run_l >= CLIP_RUN_SAMPLES && !counted_l) { events++; counted_l = 1; }
         } else {
             run_l = 0; counted_l = 0;
         }
-        if (bb >= 32767) {
+        if (bb >= CLIP_THRESHOLD) {
             if (++run_r >= CLIP_RUN_SAMPLES && !counted_r) { events++; counted_r = 1; }
         } else {
             run_r = 0; counted_r = 0;
         }
     }
+    // Left-justified int32 -> 16-bit scale.
+    const double scale = 1.0 / 65536.0;
     double n = (double)(frames > 0 ? frames : 1);
-    *peak_l = (float)pl;
-    *peak_r = (float)pr;
-    *rms_l  = (float)sqrt(sl / n);
-    *rms_r  = (float)sqrt(sr / n);
+    *peak_l = (float)((double)pl * scale);
+    *peak_r = (float)((double)pr * scale);
+    *rms_l  = (float)(sqrt(sl / n) * scale);
+    *rms_r  = (float)(sqrt(sr / n) * scale);
     if (clip_events) *clip_events = events;
 }
 
